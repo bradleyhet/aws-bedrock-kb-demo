@@ -11,6 +11,9 @@ dependencies = [
     "uvicorn>=0.54.0",
 ]
 
+[project.scripts]
+kb-demo = "kb_demo.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
