@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Local environment files (credentials come from aws login, never files)
+.env
+.env.*
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local-only planning notes: they carry job-application context that stays out of git history
+PLAN.md
+SESSION-HANDOFF.md
