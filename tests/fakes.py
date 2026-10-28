@@ -376,6 +376,59 @@ class FakeAgent(FakeService):
         return {"documentDetails": details}
 
 
+def retrieval_result(
+    file: str, score: float, text: str, *, with_location: bool = True
+) -> dict[str, Any]:
+    """One Retrieve result, shaped like those a managed knowledge base returned in step 5."""
+    uri = f"https://kb-demo-bucket.s3.ap-southeast-2.amazonaws.com/{file}"
+    result: dict[str, Any] = {
+        "content": {"text": text, "type": "TEXT"},
+        "score": score,
+        "documentId": f"s3://kb-demo-bucket/{file}",
+        "metadata": {"_source_uri": uri, "_document_title": file, "_data_source_type": "S3"},
+    }
+    if with_location:
+        result["location"] = {"type": "S3", "s3Location": {"uri": uri}}
+    return result
+
+
+class FakeRuntime(FakeService):
+    """bedrock-agent-runtime: Retrieve returns whatever the test put in results."""
+
+    service_name = "bedrock-agent-runtime"
+
+    def __init__(self, aws: "FakeAws") -> None:
+        super().__init__(aws)
+        self.results: list[dict[str, Any]] = []
+        self.requests: list[dict[str, Any]] = []
+
+    def retrieve(self, **params: Any) -> dict[str, Any]:
+        self._call("retrieve", params)
+        self.requests.append(params)
+        limit = params["retrievalConfiguration"]["managedSearchConfiguration"]["numberOfResults"]
+        return {"retrievalResults": self.results[:limit]}
+
+
+class FakeBedrock(FakeService):
+    """bedrock-runtime: Converse replies with whatever the test put in reply."""
+
+    service_name = "bedrock-runtime"
+
+    def __init__(self, aws: "FakeAws") -> None:
+        super().__init__(aws)
+        self.reply = "The handbook doesn't cover that."
+        self.requests: list[dict[str, Any]] = []
+
+    def converse(self, **params: Any) -> dict[str, Any]:
+        self._call("converse", params)
+        self.requests.append(params)
+        return {
+            "output": {"message": {"role": "assistant", "content": [{"text": self.reply}]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2},
+        }
+
+
 class FakeAws:
     def __init__(self, account_id: str = "111122223333", region: str = "ap-southeast-2") -> None:
         self.account_id = account_id
@@ -384,6 +437,8 @@ class FakeAws:
         self.s3 = FakeS3(self)
         self.iam = FakeIam(self)
         self.agent = FakeAgent(self)
+        self.runtime = FakeRuntime(self)
+        self.bedrock = FakeBedrock(self)
 
     def clients(self) -> Clients:
         return Clients(sts=self.sts, s3=self.s3, iam=self.iam, agent=self.agent)

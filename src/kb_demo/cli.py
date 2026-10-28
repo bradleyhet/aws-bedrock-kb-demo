@@ -1,4 +1,4 @@
-"""kb-demo: set up, inspect and tear down the demo's AWS resources."""
+"""kb-demo: set up, serve, inspect and tear down the knowledge base demo."""
 
 import argparse
 import logging
@@ -6,9 +6,12 @@ import sys
 from collections.abc import Mapping
 
 import boto3
+import uvicorn
 
 from kb_demo.config import Config
 from kb_demo.resources import Clients, SetupError, Status, setup, status, teardown
+from kb_demo.search import Searcher
+from kb_demo.web import create_app
 
 STATISTICS = {
     "numberOfDocumentsScanned": "scanned",
@@ -26,6 +29,16 @@ def make_clients(config: Config) -> Clients:
         s3=session.client("s3", region_name=config.region),
         iam=session.client("iam", region_name=config.region),
         agent=session.client("bedrock-agent", region_name=config.region),
+    )
+
+
+def make_searcher(config: Config, knowledge_base_id: str) -> Searcher:
+    session = boto3.Session(profile_name=config.profile, region_name=config.region)
+    return Searcher(
+        session.client("bedrock-agent-runtime", region_name=config.region),
+        session.client("bedrock-runtime", region_name=config.region),
+        knowledge_base_id=knowledge_base_id,
+        model_id=config.model_id,
     )
 
 
@@ -49,8 +62,10 @@ def print_status(found: Status, config: Config) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kb-demo", description=__doc__)
-    parser.add_argument("command", choices=["setup", "status", "teardown"])
-    command = parser.parse_args(argv).command
+    parser.add_argument("command", choices=["setup", "serve", "status", "teardown"])
+    parser.add_argument("--port", type=int, default=8000, help="port for serve (default 8000)")
+    args = parser.parse_args(argv)
+    command = args.command
 
     logging.basicConfig(format="%(message)s")
     logging.getLogger("kb_demo").setLevel(logging.INFO)
@@ -67,6 +82,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Ingestion: {describe(report.statistics)}")
         for name, state in sorted(report.documents.items()):
             print(f"  {name:<24}{state}")
+        return 0
+
+    if command == "serve":
+        kb = status(clients, config).knowledge_base
+        searcher = None
+        if kb and kb.status == "ACTIVE":
+            searcher = make_searcher(config, kb.id)
+            print(f"Knowledge base {kb.id}, model {config.model_id}")
+        else:
+            print("No ACTIVE knowledge base named kb-demo; the page will say to run setup first.")
+        # Local only: the page has no authentication.
+        uvicorn.run(create_app(searcher), host="127.0.0.1", port=args.port)
         return 0
 
     if command == "status":
