@@ -125,7 +125,8 @@ def teardown(
 ) -> Status:
     """Delete everything setup made, then report what is left: nothing, if all went well."""
     found = status(clients, config)
-    agent, timing = clients.agent, {"timeout": 600, "sleep": sleep, "clock": clock}
+    # The step 9 drill took about 9 minutes to delete the data source, so allow 30 for each wait.
+    agent, timing = clients.agent, {"timeout": 1800, "sleep": sleep, "clock": clock}
 
     if found.knowledge_base:
         kb_id = found.knowledge_base.id

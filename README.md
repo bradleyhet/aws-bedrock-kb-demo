@@ -79,6 +79,9 @@ Measured on 28 October 2026 against the real account, with Haiku 4.5:
   all 8 files were INDEXED.
 - **Rerun:** 67 s with the same knowledge base. The job scanned 8, indexed 0 as new and 8 as
   modified (setup re-uploads every file), and failed none.
+- **Teardown:** 11 min 36 s, about 9 minutes of it deleting the data source. The AWS CLI then
+  showed no knowledge base, bucket or role left, and a setup from scratch rebuilt everything in
+  2 min 32 s (scanned 8, new 8, failed 0).
 - **Retrieve** ranks the expected file first for each sample question:
 
   | Sample question | Expected file | Its score | Best other file |
@@ -120,7 +123,8 @@ uv run kb-demo teardown
 ```
 
 Teardown deletes the data source, waits for it to go, deletes the knowledge base and waits again,
-then empties and deletes the bucket and deletes the role. It finishes by printing the status, where
+then empties and deletes the bucket and deletes the role. Expect it to take around 12 minutes,
+most of it waiting for the data source. It finishes by printing the status, where
 every resource should read "not found", and exits with 1 if anything remains. It also copes with an
 account that a failed setup left half-built.
 
