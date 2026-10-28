@@ -28,10 +28,8 @@ Run the STOP check before each drive and each high-risk task:
 
 ## Calling the duty supervisor
 
-The duty supervisor answers 02 5550 4321 at all hours. They can move the job, arrange a hotel or
-send someone else. Nobody is penalised for stopping because of fatigue.
+The duty supervisor answers 02 5550 4321 at all hours. They can move the job, arrange a hotel or send someone else. Nobody is penalised for stopping because of fatigue.
 
 ## Going over a limit
 
-If an emergency means you must go over a limit, your supervisor records it in SafeTrack by the end
-of the next business day, with the reason and the rest you'll take afterwards.
+If an emergency means you must go over a limit, your supervisor records it in SafeTrack by the end of the next business day, with the reason and the rest you'll take afterwards.

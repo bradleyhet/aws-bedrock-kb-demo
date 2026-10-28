@@ -12,13 +12,11 @@ Before you work at any client site for the first time, you need:
 2. The client's own induction, if they have one. The job sheet links to it.
 3. A current White Card (general construction induction) if the site is a construction site.
 
-Your induction records are kept in SiteBook, and your supervisor checks them before assigning you
-a job.
+Your induction records are kept in SiteBook, and your supervisor checks them before assigning you a job.
 
 ## Site tiers
 
-- **Tier 1** sites are high risk: mines, refineries, hospitals and live substations. On your first
-  two visits to any Tier 1 site, you work with a buddy who has been there before.
+- **Tier 1** sites are high risk: mines, refineries, hospitals and live substations. On your first two visits to any Tier 1 site, you work with a buddy who has been there before.
 - **Tier 2** sites are everything else, such as offices, shops, schools and warehouses.
 
 The tier is shown at the top of every job sheet.
@@ -31,8 +29,7 @@ At every site, wear:
 - steel-capped boots
 - safety glasses
 
-On Tier 1 sites, also wear a hard hat, and carry your personal gas detector when the job sheet
-lists one.
+On Tier 1 sites, also wear a hard hat, and carry your personal gas detector when the job sheet lists one.
 
 ## Arriving on site
 
@@ -42,5 +39,4 @@ lists one.
 
 ## If you're refused entry
 
-If a client turns you away because your inductions are out of date, leave the site, tell your
-supervisor and book the missing module in SiteBook. The time it takes is paid.
+If a client turns you away because your inductions are out of date, leave the site, tell your supervisor and book the missing module in SiteBook. The time it takes is paid.
