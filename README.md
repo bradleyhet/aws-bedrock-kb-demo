@@ -5,10 +5,15 @@ in the answer cites a numbered passage, and the passages behind it are listed un
 their retrieval scores. `cdk deploy` creates the AWS resources, `kb-demo ingest` loads the
 handbook, and `cdk destroy` removes it all.
 
+Around that sits a small serverless service, built and measured a step at a time: the same search
+behind an IAM-authorised HTTP API on Lambda, ingestion as a Step Functions workflow that won't pass
+until every file is indexed, the whole stack in one CDK app, and releases from GitHub Actions that
+sign in to AWS by OIDC and deploy only once an evaluation gate passes.
+
 The handbook is fictional. It belongs to Acme Field Services, an invented company, and its policies
 are full of invented specifics: a hotel limit of A$255 a night in Perth, four hours to log a near
-miss, an excess of A$250 on a second laptop claim. A correct answer can only have come from retrieval, not from
-anything the model already knew.
+miss, an excess of A$250 on a second laptop claim. A correct answer can only have come from
+retrieval, not from anything the model already knew.
 
 ## Why not Amazon Kendra
 
@@ -224,6 +229,9 @@ Measured on 28 October 2026 against the real account, with Haiku 4.5, using the 
     FAILED in 62.7 s with `CorpusNotIndexed`:
     "ingestion job VHJH2DHCDW did not index the corpus: scanned 8 of 9 corpus files; not indexed:
     ghost.md (missing)".
+  - Released as `v0.3.0` ([run 41011408732](https://github.com/bradleyhet/aws-bedrock-kb-demo/actions/runs/41011408732)): the gate passed 4 of 4 checks in a 19 s
+    job, and `cdk deploy` from GitHub found only CDK's metadata to update (deployment 10.2 s), so
+    the stack deployed by hand already matched the tagged commit.
 
 ## Cost
 
@@ -291,6 +299,12 @@ answer can fail.
 - **Conversation.** Each question stands alone, with no follow-ups and no streaming.
 - **Triggers.** The workflow runs when `kb-demo ingest` starts it. Nothing starts it on an S3
   upload or a schedule.
+- **Release safety beyond the gate.** There is one environment, with no staging, canary or
+  automatic rollback. The gate tests a release's code and prompt against the knowledge base already
+  deployed, so a change to the stack itself deploys without being evaluated first. CI deploys only
+  `kb-demo`; `kb-demo-ci` is deployed by hand.
+- **Operations.** No alarms, dashboards or tracing. The Lambda logs to CloudWatch Logs, kept for a
+  week, and Step Functions keeps each execution's history.
 
 ## Layout
 
