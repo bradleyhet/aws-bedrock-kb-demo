@@ -23,6 +23,7 @@ where a Kendra GenAI index is billed by the hour.
 
 ```
 corpus/*.md ──(kb-demo ingest)──> S3 bucket ──> managed data source ──ingest──> managed index
+                  └──> Step Functions: start the job ──> poll ──> list documents ──> all INDEXED?
                                                                                    │
 browser ──> FastAPI on 127.0.0.1:8000 ── Retrieve ──> top 5 passages (file, score, text)
                                      └── Converse ──> answer citing [1]..[n]
@@ -33,14 +34,22 @@ browser ──> FastAPI on 127.0.0.1 ──SigV4──> HTTP API (IAM auth) ─�
 
 - **One CDK stack** (`infra/app.py`) holds everything: an S3 bucket for the corpus, an IAM role the
   knowledge base uses to read it, a knowledge base of type `MANAGED` with managed embeddings, a
-  data source using the managed S3 connector, and the API below. Everything that takes tags is
-  tagged `Project=kb-demo`.
-- **Ingest** uploads `corpus/` to the stack's bucket, deletes objects no longer there, and runs an
-  ingestion job. Rerunning it is safe.
+  data source using the managed S3 connector, the ingest workflow, and the API below. Everything
+  that takes tags is tagged `Project=kb-demo`.
+- **Ingest** uploads `corpus/` to the stack's bucket, deletes objects no longer there, then starts
+  the ingest workflow with the corpus file names and waits for it to end. Rerunning it is safe.
 - **Ingestion is checked, not trusted.** A job can report COMPLETE having indexed nothing, and its
-  new-document count reads 0 whenever an unchanged corpus is re-synced. So ingest lists the
+  new-document count reads 0 whenever an unchanged corpus is re-synced. So the workflow lists the
   documents in the knowledge base afterwards, and fails unless every corpus file is INDEXED, the
   job scanned as many documents as there are files, and none failed.
+- **The workflow is Step Functions, with no Lambda.** A Standard state machine written in JSONata
+  (`infra/ingest_workflow.py`) calls Bedrock through Step Functions' AWS SDK integrations: it
+  starts an ingestion job, reads it every 15 seconds until it ends, lists the documents, and then
+  checks them. It gives up after 15 minutes. A failed check fails the execution with
+  `CorpusNotIndexed` and a cause that says what was wrong, such as
+  `scanned 8 of 9 corpus files; not indexed: ghost.md (missing)`, and a FAILED or STOPPED job fails
+  it with `IngestionJobFailed` and the job's own reasons. Its role can start, read and list
+  ingestion on this one knowledge base and nothing else.
 - **Two calls, not RetrieveAndGenerate.** The page calls Retrieve for the top five passages, then
   Converse with those passages numbered in the prompt. The system prompt tells the model to answer
   only from the passages, to treat them as data rather than instructions, to cite them as `[n]`,
@@ -67,9 +76,9 @@ with access to the generation model and CDK bootstrapped.
 aws login --profile triage   # short-lived credentials; no access keys anywhere
 uv sync
 bunx aws-cdk@2.1146.1 deploy kb-demo --profile triage   # create or update it (npx works too)
-uv run kb-demo ingest        # upload the corpus, ingest it, check every file is INDEXED
+uv run kb-demo ingest        # upload the corpus, then run the ingest workflow over it
 uv run kb-demo serve         # then open http://127.0.0.1:8000
-uv run kb-demo status        # what exists, the last ingestion, the model in use
+uv run kb-demo status        # what exists, the workflow, the last ingestion, the model
 uv run kb-demo eval          # the release gate: sample questions and an off-corpus one
 ```
 
@@ -193,6 +202,29 @@ Measured on 28 October 2026 against the real account, with Haiku 4.5, using the 
     and only the off-corpus question, still declined, passed. The deploy job was skipped, and the
     function kept the code the release had deployed.
 
+- **The ingest workflow,** measured on 30 October 2026:
+  - Step Functions' validator recognised the three `bedrockagent` SDK actions the workflow uses
+    and rejected a made-up one, so no Lambda was needed.
+  - The check state, run through TestState before any deploy, failed all five broken cases, in the
+    wording of the Python check it replaces: a job reporting COMPLETE that indexed nothing
+    (`scanned 0 of 2 corpus files; not indexed: a.md (missing), b.md (missing)`), one failed
+    document, a file missing from the index, two unindexed files, and absent statistics. A fully
+    indexed corpus passed.
+  - TestState on the listing step, with the workflow's own role against the live knowledge base,
+    found that ListKnowledgeBaseDocuments accepts at most 100 results a page; the first draft asked
+    for 1,000 and got `ValidationException`.
+  - `cdk deploy` adding the workflow took 64.2 s.
+  - A passing run, `uv run kb-demo ingest`: execution
+    `arn:aws:states:ap-southeast-2:***:execution:kb-demo-ingest:f20f741a-2a9f-46fc-af70-3e4fdfb9be70`
+    SUCCEEDED in 123.8 s (8 polls, 29 states), scanned 8, modified 8, failed 0, all 8 files
+    INDEXED. The command took 2 min 16 s in all, including the upload.
+  - A forced failure: the same workflow started with the real corpus plus `ghost.md`, which isn't
+    in the bucket. Execution
+    `arn:aws:states:ap-southeast-2:***:execution:kb-demo-ingest:forced-failure-ghost-file`
+    FAILED in 62.7 s with `CorpusNotIndexed`:
+    "ingestion job VHJH2DHCDW did not index the corpus: scanned 8 of 9 corpus files; not indexed:
+    ghost.md (missing)".
+
 ## Cost
 
 The managed knowledge base's list prices as of 28 October 2026
@@ -222,10 +254,10 @@ bunx aws-cdk@2.1146.1 destroy kb-demo --profile triage --force
 uv run kb-demo status        # every resource should read "not found"
 ```
 
-CloudFormation deletes the API, the data source, the knowledge base, the role and the bucket,
-which the auto-delete handler empties first. Expect it to take around 12 minutes, most of it
-waiting for the data source. It leaves the account's CDK bootstrap stack (`CDKToolkit`) and the
-`kb-demo-ci` stack in place; `cdk destroy kb-demo-ci` removes the latter.
+CloudFormation deletes the API, the ingest workflow, the data source, the knowledge base, the
+roles and the bucket, which the auto-delete handler empties first. Expect it to take around 12
+minutes, most of it waiting for the data source. It leaves the account's CDK bootstrap stack
+(`CDKToolkit`) and the `kb-demo-ci` stack in place; `cdk destroy kb-demo-ci` removes the latter.
 
 ## Tests
 
@@ -235,12 +267,15 @@ uv run pytest
 ```
 
 The tests make no AWS calls. In-memory fakes stand in for S3, IAM, `bedrock-agent`,
-`bedrock-agent-runtime` and `bedrock-runtime`, and they check every call's parameters against
-botocore's service models, so a misspelt or misplaced parameter fails in a test the way it would
-against AWS. Ingest and status are tested over fakes set up the way `cdk deploy` leaves the
-account, as are the search and the web page. The Lambda handler is tested on HTTP API events, and
-the signing client is tested against a fake API that checks its SigV4 headers and runs the real
-handler. The evaluation gate is tested on scripted answers, one for each way an answer can fail.
+`stepfunctions`, `bedrock-agent-runtime` and `bedrock-runtime`, and they check every call's
+parameters against botocore's service models, so a misspelt or misplaced parameter fails in a test
+the way it would against AWS. Ingest and status are tested over fakes set up the way `cdk deploy`
+leaves the account, as are the search and the web page. The workflow is a scripted fake there, so
+its check is not unit-tested: it was run through Step Functions' TestState API against six cases,
+and against the live knowledge base (see Measured results). The Lambda handler is tested on HTTP
+API events, and the signing client is tested against a fake API that checks its SigV4 headers and
+runs the real handler. The evaluation gate is tested on scripted answers, one for each way an
+answer can fail.
 
 ## What this doesn't show
 
@@ -254,6 +289,8 @@ handler. The evaluation gate is tested on scripted answers, one for each way an 
 - **Evaluation.** Three sample questions and one off-corpus question, checked by script. There is
   no evaluation set or scoring.
 - **Conversation.** Each question stands alone, with no follow-ups and no streaming.
+- **Triggers.** The workflow runs when `kb-demo ingest` starts it. Nothing starts it on an S3
+  upload or a schedule.
 
 ## Layout
 
@@ -269,6 +306,7 @@ src/kb_demo/cli.py          the kb-demo command
 src/kb_demo/handler.py      the Lambda handler behind POST /ask
 src/kb_demo/remote.py       the SigV4-signing client the page uses when KB_DEMO_API_URL is set
 infra/app.py, cdk.json      the CDK app: the kb-demo stack, and kb-demo-ci for GitHub's OIDC roles
+infra/ingest_workflow.py    the ingest workflow: a JSONata state machine, SDK integrations only
 .github/workflows/ci.yml    checks on every push; gate, then deploy, on a v* tag
 tests/                      unit tests over in-memory AWS fakes
 ```

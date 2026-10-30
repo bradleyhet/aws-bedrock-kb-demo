@@ -20,10 +20,14 @@ class Config:
     knowledge_base_name: str = "kb-demo"
     data_source_name: str = "kb-demo-s3"
     role_name: str = "kb-demo-kb-role"
+    workflow_name: str = "kb-demo-ingest"
     api_url: str | None = None  # the deployed HTTP API; unset, the page calls Bedrock directly
 
     def bucket_name(self, account_id: str) -> str:
         return f"kb-demo-{account_id}-{self.region}"
+
+    def workflow_arn(self, account_id: str) -> str:
+        return f"arn:aws:states:{self.region}:{account_id}:stateMachine:{self.workflow_name}"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Self:

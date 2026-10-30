@@ -31,6 +31,7 @@ def make_clients(config: Config) -> Clients:
         s3=session.client("s3", region_name=config.region),
         iam=session.client("iam", region_name=config.region),
         agent=session.client("bedrock-agent", region_name=config.region),
+        sfn=session.client("stepfunctions", region_name=config.region),
     )
 
 
@@ -55,6 +56,7 @@ def print_status(found: Status, config: Config) -> None:
         "role": found.role,
         "knowledge base": kb and f"{kb.id} ({kb.status})",
         "data source": ds and f"{ds.id} ({ds.status})",
+        "ingest workflow": found.workflow,
         "last ingestion": job and f"{job.status}: {describe(job.statistics)}",
         "model": config.model_id,
     }
@@ -81,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Ingest failed: {error}", file=sys.stderr)
             return 1
         print(f"Knowledge base {report.knowledge_base_id}, data source {report.data_source_id}")
+        print(f"Workflow execution {report.execution_arn} ({report.seconds:.0f} s)")
         print(f"Ingestion: {describe(report.statistics)}")
         for name, state in sorted(report.documents.items()):
             print(f"  {name:<24}{state}")

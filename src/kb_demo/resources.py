@@ -1,5 +1,6 @@
 """Load the corpus into the stack cdk deploy made, and report on it; everything is found by name."""
 
+import json
 import logging
 import time
 from collections.abc import Callable, Mapping
@@ -13,7 +14,8 @@ from kb_demo.config import Config
 
 log = logging.getLogger(__name__)
 
-FAILED = {"FAILED", "STOPPED", "DELETE_UNSUCCESSFUL", "UPDATE_UNSUCCESSFUL"}
+# The workflow gives up after 15 minutes (its TimeoutSeconds); wait long enough to hear it.
+WORKFLOW_WAIT = 960
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,7 @@ class Clients:
     s3: Any
     iam: Any
     agent: Any  # bedrock-agent
+    sfn: Any  # stepfunctions
 
 
 class Found(NamedTuple):
@@ -41,6 +44,7 @@ class Status:
     role: str | None = None
     knowledge_base: Found | None = None
     data_source: Found | None = None
+    workflow: str | None = None  # the ingest state machine's ARN
     last_ingestion: Ingestion | None = None
 
 
@@ -50,6 +54,8 @@ class IngestReport:
     data_source_id: str
     statistics: Mapping[str, int]
     documents: Mapping[str, str]  # corpus file name -> document status
+    execution_arn: str
+    seconds: float  # how long the workflow ran
 
 
 class IngestError(Exception):
@@ -81,10 +87,11 @@ def wait_for[T](
 def ingest(
     clients: Clients, config: Config, *, sleep: Sleep = time.sleep, clock: Clock = time.monotonic
 ) -> IngestReport:
-    """Upload the corpus to the stack's bucket, ingest it, and check every file was indexed."""
+    """Upload the corpus to the stack's bucket, then run the ingest workflow over it. The workflow
+    passes only if every corpus file was indexed: a COMPLETE job alone proves nothing (lab 04.1)."""
     found = status(clients, config)
     kb, ds = found.knowledge_base, found.data_source
-    if not (found.bucket and kb and ds):
+    if not (found.bucket and kb and ds and found.workflow):
         raise IngestError("the kb-demo stack isn't deployed; run cdk deploy first")
     if (kb.status, ds.status) != ("ACTIVE", "AVAILABLE"):
         raise IngestError(f"the knowledge base is {kb.status} and the data source {ds.status}")
@@ -92,13 +99,22 @@ def ingest(
 
     log.info("Bucket %s: syncing %d corpus files", found.bucket, len(files))
     _sync_corpus(clients.s3, found.bucket, files)
-    log.info("Ingesting the corpus into knowledge base %s", kb.id)
-    statistics = _ingest(clients.agent, kb.id, ds.id, sleep=sleep, clock=clock)
-    documents = _documents(clients.agent, kb.id, ds.id)
-    problems = _ingestion_problems(statistics, documents, [file.name for file in files])
-    if problems:
-        raise IngestError(f"ingestion did not index the corpus: {'; '.join(problems)}")
-    return IngestReport(kb.id, ds.id, statistics, documents)
+    log.info("Running the ingest workflow %s", found.workflow)
+    corpus = [file.name for file in files]
+    execution = _run(clients.sfn, found.workflow, corpus, sleep=sleep, clock=clock)
+    if execution["status"] != "SUCCEEDED":
+        reason = ": ".join(filter(None, (execution.get("error"), execution.get("cause"))))
+        raise IngestError(
+            f"the ingest workflow ended {execution['status']}: {reason or 'no reason given'}"
+            f" ({execution['executionArn']})"
+        )
+    output = json.loads(execution["output"])
+    # Step Functions capitalises the API's field names; status prints boto3's spelling.
+    statistics = {key[0].lower() + key[1:]: value for key, value in output["statistics"].items()}
+    seconds = (execution["stopDate"] - execution["startDate"]).total_seconds()
+    return IngestReport(
+        kb.id, ds.id, statistics, output["documents"], execution["executionArn"], seconds
+    )
 
 
 def status(clients: Clients, config: Config) -> Status:
@@ -111,18 +127,13 @@ def status(clients: Clients, config: Config) -> Status:
         role=config.role_name if _role_arn(clients.iam, config.role_name) else None,
         knowledge_base=kb,
         data_source=ds,
+        workflow=_workflow(clients.sfn, config.workflow_arn(account_id)),
         last_ingestion=_last_ingestion(clients.agent, kb.id, ds.id) if kb and ds else None,
     )
 
 
 def _code(error: ClientError) -> str:
     return error.response["Error"]["Code"]
-
-
-def _settled(status: str, *, ready: str, what: str, reasons: list[str]) -> bool:
-    if status in FAILED:
-        raise IngestError(f"{what} is {status}: {'; '.join(reasons) or 'no reason given'}")
-    return status == ready
 
 
 def _bucket_exists(s3: Any, bucket: str) -> bool:
@@ -151,6 +162,16 @@ def _sync_corpus(s3: Any, bucket: str, files: list[Path]) -> None:
         s3.delete_objects(Bucket=bucket, Delete={"Objects": stale, "Quiet": True})
 
 
+def _workflow(sfn: Any, arn: str) -> str | None:
+    try:
+        sfn.describe_state_machine(stateMachineArn=arn)
+    except ClientError as error:
+        if _code(error) == "StateMachineDoesNotExist":
+            return None
+        raise
+    return arn
+
+
 def _role_arn(iam: Any, role_name: str) -> str | None:
     try:
         return iam.get_role(RoleName=role_name)["Role"]["Arn"]
@@ -176,49 +197,18 @@ def _find_data_source(agent: Any, kb_id: str, name: str) -> Found | None:
     return None
 
 
-def _ingest(agent: Any, kb_id: str, ds_id: str, *, sleep: Sleep, clock: Clock) -> Mapping[str, int]:
-    ids = {"knowledgeBaseId": kb_id, "dataSourceId": ds_id}
-    job_id = agent.start_ingestion_job(**ids)["ingestionJob"]["ingestionJobId"]
+def _run(sfn: Any, arn: str, corpus: list[str], *, sleep: Sleep, clock: Clock) -> dict[str, Any]:
+    """Start the workflow over these corpus files and wait for it to end, however it ends."""
+    workflow_input = json.dumps({"corpus": corpus})
+    execution_arn = sfn.start_execution(stateMachineArn=arn, input=workflow_input)["executionArn"]
 
-    def finished() -> dict[str, Any] | None:
-        job = agent.get_ingestion_job(**ids, ingestionJobId=job_id)["ingestionJob"]
-        reasons = job.get("failureReasons", [])
-        done = _settled(job["status"], ready="COMPLETE", what="ingestion job", reasons=reasons)
-        return job if done else None
+    def ended() -> dict[str, Any] | None:
+        execution = sfn.describe_execution(executionArn=execution_arn)
+        return execution if execution["status"] != "RUNNING" else None
 
-    job = wait_for(finished, what="ingestion to COMPLETE", timeout=900, sleep=sleep, clock=clock)
-    return job.get("statistics", {})
-
-
-def _documents(agent: Any, kb_id: str, ds_id: str) -> dict[str, str]:
-    pages = agent.get_paginator("list_knowledge_base_documents").paginate(
-        knowledgeBaseId=kb_id, dataSourceId=ds_id
+    return wait_for(
+        ended, what="the ingest workflow", timeout=WORKFLOW_WAIT, sleep=sleep, clock=clock
     )
-    return {
-        detail["identifier"]["s3"]["uri"].rsplit("/", 1)[-1]: detail["status"]
-        for page in pages
-        for detail in page["documentDetails"]
-    }
-
-
-def _ingestion_problems(
-    statistics: Mapping[str, int], documents: Mapping[str, str], expected: list[str]
-) -> list[str]:
-    """Why ingestion can't be trusted; COMPLETE alone proves nothing (lab 04.1)."""
-    problems = []
-    scanned = statistics.get("numberOfDocumentsScanned", 0)
-    if scanned != len(expected):
-        problems.append(f"scanned {scanned} of {len(expected)} corpus files")
-    if failed := statistics.get("numberOfDocumentsFailed", 0):
-        problems.append(f"{failed} failed")
-    not_indexed = [
-        f"{name} ({documents.get(name, 'missing')})"
-        for name in expected
-        if documents.get(name) != "INDEXED"
-    ]
-    if not_indexed:
-        problems.append(f"not indexed: {', '.join(not_indexed)}")
-    return problems
 
 
 def _last_ingestion(agent: Any, kb_id: str, ds_id: str) -> Ingestion | None:

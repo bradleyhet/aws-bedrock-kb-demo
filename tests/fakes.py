@@ -6,6 +6,8 @@ code under test has to wait for them.
 """
 
 import itertools
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import botocore.session
@@ -58,6 +60,14 @@ class FakeService:
 
     def _error(self, method: str, code: str) -> ClientError:
         return ClientError({"Error": {"Code": code, "Message": code}}, self._operations[method])
+
+    def _poll(self, table: dict[str, dict[str, Any]], key: str, method: str) -> dict[str, Any]:
+        record = table.get(key)
+        if record is None:
+            raise self._error(method, "ResourceNotFoundException")
+        if record["next"]:
+            record["status"] = record["next"].pop(0)
+        return record
 
     def get_paginator(self, method: str) -> _SinglePage:
         return _SinglePage(getattr(self, method))
@@ -125,7 +135,8 @@ class FakeIam(FakeService):
 
 
 class FakeAgent(FakeService):
-    """bedrock-agent: managed knowledge bases, their data sources and ingestion jobs."""
+    """bedrock-agent: managed knowledge bases, their data sources and ingestion jobs. The
+    ingest workflow runs the jobs, so here a job only appears, finished, when FakeSfn runs."""
 
     service_name = "bedrock-agent"
 
@@ -134,35 +145,15 @@ class FakeAgent(FakeService):
         self.knowledge_bases: dict[str, dict[str, Any]] = {}
         self.data_sources: dict[str, dict[str, Any]] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
-        self.documents: dict[str, dict[str, str]] = {}  # data source id -> key -> status
-        self._ingested: dict[str, dict[str, bytes]] = {}  # data source id -> key -> content
         self._ids = itertools.count(1)
-        # Test knobs: the status ingestion gives a key (default INDEXED), and an ingestion that
-        # completes without reading the bucket, as lab 04.1 saw.
-        self.document_status: dict[str, str] = {}
-        self.index_nothing = False
 
     def _new_id(self, prefix: str) -> str:
         return f"{prefix}{next(self._ids):08d}"
-
-    def _poll(self, table: dict[str, dict[str, Any]], key: str, method: str) -> dict[str, Any]:
-        record = table.get(key)
-        if record is None:
-            raise self._error(method, "ResourceNotFoundException")
-        if record["next"]:
-            record["status"] = record["next"].pop(0)
-        return record
 
     def _knowledge_base(self, method: str, kb_id: str) -> dict[str, Any]:
         if kb_id not in self.knowledge_bases:
             raise self._error(method, "ResourceNotFoundException")
         return self.knowledge_bases[kb_id]
-
-    def _data_source(self, method: str, kb_id: str, ds_id: str) -> dict[str, Any]:
-        source = self.data_sources.get(ds_id)
-        if source is None or source["knowledgeBaseId"] != kb_id:
-            raise self._error(method, "ResourceNotFoundException")
-        return source
 
     @staticmethod
     def _kb_view(record: dict[str, Any]) -> dict[str, Any]:
@@ -224,40 +215,18 @@ class FakeAgent(FakeService):
         ]
         return {"dataSourceSummaries": sources}
 
-    def start_ingestion_job(self, **params: Any) -> dict[str, Any]:
-        self._call("start_ingestion_job", params)
-        kb_id, ds_id = params["knowledgeBaseId"], params["dataSourceId"]
-        source = self._data_source("start_ingestion_job", kb_id, ds_id)
-        objects = {} if self.index_nothing else dict(self.aws.s3.buckets.get(source["bucket"], {}))
-        before = self._ingested.get(ds_id, {})
-        statuses = {key: self.document_status.get(key, "INDEXED") for key in objects}
-        indexed = [key for key, status in statuses.items() if status == "INDEXED"]
-        statistics = {
-            "numberOfDocumentsScanned": len(objects),
-            # Like the real counters, unchanged documents count as neither new nor modified.
-            "numberOfNewDocumentsIndexed": sum(key not in before for key in indexed),
-            "numberOfModifiedDocumentsIndexed": sum(
-                key in before and before[key] != objects[key] for key in indexed
-            ),
-            "numberOfDocumentsDeleted": sum(key not in objects for key in before),
-            "numberOfDocumentsFailed": sum(s == "FAILED" for s in statuses.values()),
-        }
-        self._ingested[ds_id], self.documents[ds_id] = objects, statuses
+    def ingested(self, kb_id: str, ds_id: str, statistics: dict[str, int]) -> str:
+        """Record a finished ingestion job, as the workflow leaves one."""
         job_id = self._new_id("JOB")
         self.jobs[job_id] = {
             "knowledgeBaseId": kb_id,
             "dataSourceId": ds_id,
             "ingestionJobId": job_id,
             "statistics": statistics,
-            "status": "STARTING",
-            "next": ["IN_PROGRESS", "COMPLETE"],
+            "status": "COMPLETE",
+            "next": [],
         }
-        return {"ingestionJob": self._job_view(self.jobs[job_id])}
-
-    def get_ingestion_job(self, **params: Any) -> dict[str, Any]:
-        self._call("get_ingestion_job", params)
-        record = self._poll(self.jobs, params["ingestionJobId"], "get_ingestion_job")
-        return {"ingestionJob": self._job_view(record)}
+        return job_id
 
     def list_ingestion_jobs(self, **params: Any) -> dict[str, Any]:
         self._call("list_ingestion_jobs", params)
@@ -268,20 +237,80 @@ class FakeAgent(FakeService):
         ]
         return {"ingestionJobSummaries": jobs[: params.get("maxResults", len(jobs))]}
 
-    def list_knowledge_base_documents(self, **params: Any) -> dict[str, Any]:
-        self._call("list_knowledge_base_documents", params)
-        kb_id, ds_id = params["knowledgeBaseId"], params["dataSourceId"]
-        bucket = self._data_source("list_knowledge_base_documents", kb_id, ds_id)["bucket"]
-        details = [
-            {
-                "knowledgeBaseId": kb_id,
-                "dataSourceId": ds_id,
-                "status": status,
-                "identifier": {"dataSourceType": "S3", "s3": {"uri": f"s3://{bucket}/{key}"}},
+
+class FakeSfn(FakeService):
+    """stepfunctions: the deployed ingest workflow, scripted. The workflow's own check runs live
+    (step 2.4: TestState and real executions); here every execution indexes the corpus it was
+    given, unless a test sets how it ends instead."""
+
+    service_name = "stepfunctions"
+    STARTED = datetime(2026, 10, 30, 5, 0, tzinfo=UTC)
+    TOOK = timedelta(seconds=75)
+
+    def __init__(self, aws: "FakeAws") -> None:
+        super().__init__(aws)
+        self.state_machines: dict[str, tuple[str, str]] = {}  # ARN -> (knowledge base, source)
+        self.executions: dict[str, dict[str, Any]] = {}
+        self.inputs: list[dict[str, Any]] = []  # each execution's input
+        self.ending: tuple[str, str | None, str | None] | None = None  # status, error, cause
+        self._ids = itertools.count(1)
+
+    def describe_state_machine(self, **params: Any) -> dict[str, Any]:
+        self._call("describe_state_machine", params)
+        arn = params["stateMachineArn"]
+        if arn not in self.state_machines:
+            raise self._error("describe_state_machine", "StateMachineDoesNotExist")
+        return {"stateMachineArn": arn, "name": arn.rsplit(":", 1)[-1], "status": "ACTIVE"}
+
+    def start_execution(self, **params: Any) -> dict[str, Any]:
+        self._call("start_execution", params)
+        machine = params["stateMachineArn"]
+        if machine not in self.state_machines:
+            raise self._error("start_execution", "StateMachineDoesNotExist")
+        workflow_input = json.loads(params["input"])
+        self.inputs.append(workflow_input)
+        corpus = workflow_input["corpus"]
+        statistics = {  # as the workflow returns them: Step Functions capitalises field names
+            "NumberOfDocumentsScanned": len(corpus),
+            "NumberOfNewDocumentsIndexed": len(corpus),
+            "NumberOfModifiedDocumentsIndexed": 0,
+            "NumberOfDocumentsDeleted": 0,
+            "NumberOfDocumentsFailed": 0,
+        }
+        job_id = self.aws.agent.ingested(
+            *self.state_machines[machine],
+            {key[0].lower() + key[1:]: value for key, value in statistics.items()},
+        )
+        if self.ending:
+            status, error, cause = self.ending
+            end = {"error": error, "cause": cause}
+        else:
+            status = "SUCCEEDED"
+            output = {
+                "ingestionJobId": job_id,
+                "statistics": statistics,
+                "documents": dict.fromkeys(corpus, "INDEXED"),
             }
-            for key, status in self.documents.get(ds_id, {}).items()
-        ]
-        return {"documentDetails": details}
+            end = {"output": json.dumps(output)}
+        arn = f"{machine.replace(':stateMachine:', ':execution:')}:{next(self._ids):08d}"
+        self.executions[arn] = {
+            "executionArn": arn,
+            "stateMachineArn": machine,
+            "status": "RUNNING",
+            "next": ["RUNNING", status],
+            "startDate": self.STARTED,
+            "end": {key: value for key, value in end.items() if value is not None},
+        }
+        return {"executionArn": arn, "startDate": self.STARTED}
+
+    def describe_execution(self, **params: Any) -> dict[str, Any]:
+        self._call("describe_execution", params)
+        record = self._poll(self.executions, params["executionArn"], "describe_execution")
+        view = {key: record[key] for key in ("executionArn", "stateMachineArn", "status")}
+        view["startDate"] = record["startDate"]
+        if record["status"] != "RUNNING":
+            view |= {"stopDate": record["startDate"] + self.TOOK, **record["end"]}
+        return view
 
 
 def retrieval_result(
@@ -362,15 +391,16 @@ class FakeAws:
         self.s3 = FakeS3(self)
         self.iam = FakeIam(self)
         self.agent = FakeAgent(self)
+        self.sfn = FakeSfn(self)
         self.runtime = FakeRuntime(self)
         self.bedrock = FakeBedrock(self)
 
     def clients(self) -> Clients:
-        return Clients(sts=self.sts, s3=self.s3, iam=self.iam, agent=self.agent)
+        return Clients(sts=self.sts, s3=self.s3, iam=self.iam, agent=self.agent, sfn=self.sfn)
 
     def deploy(self, config: Config) -> None:
-        """What cdk deploy leaves: an empty bucket, the role, an ACTIVE knowledge base and an
-        AVAILABLE data source that reads the bucket."""
+        """What cdk deploy leaves: an empty bucket, the role, an ACTIVE knowledge base, an
+        AVAILABLE data source that reads the bucket, and the ingest workflow over them."""
         bucket = config.bucket_name(self.account_id)
         self.s3.buckets[bucket] = {}
         role_arn = f"arn:aws:iam::{self.account_id}:role/{config.role_name}"
@@ -397,3 +427,4 @@ class FakeAws:
         # CloudFormation returns only once both have settled.
         self.agent.knowledge_bases[kb_id].update(status="ACTIVE", next=[])
         self.agent.data_sources[ds_id].update(status="AVAILABLE", next=[])
+        self.sfn.state_machines[config.workflow_arn(self.account_id)] = (kb_id, ds_id)

@@ -1,10 +1,11 @@
 """CDK app: the whole demo as one stack.
 
-The corpus bucket, the knowledge base and its data source, and POST /ask on an HTTP API that
-requires IAM authorisation, answered by a Lambda. After cdk deploy, `kb-demo ingest` uploads the
-corpus and ingests it.
+The corpus bucket, the knowledge base and its data source, POST /ask on an HTTP API that
+requires IAM authorisation, answered by a Lambda, and the ingest workflow in Step Functions. After
+cdk deploy, `kb-demo ingest` uploads the corpus and runs the workflow over it.
 """
 
+import json
 import os
 import subprocess
 from importlib.metadata import version
@@ -19,9 +20,11 @@ from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_stepfunctions as sfn
 from aws_cdk.aws_apigatewayv2_authorizers import HttpIamAuthorizer
 from aws_cdk.aws_apigatewayv2_integrations import HttpLambdaIntegration
 from constructs import Construct
+from ingest_workflow import DEFINITION
 
 from kb_demo.config import REPO_ROOT, TAGS, Config
 
@@ -62,10 +65,13 @@ class UvInstall:
 class DemoStack(cdk.Stack):
     def __init__(self, scope: Construct, config: Config, **kwargs: object) -> None:
         super().__init__(scope, "kb-demo", **kwargs)
-        knowledge_base = self.knowledge_base(config)
+        knowledge_base, data_source = self.knowledge_base(config)
         self.api(config, knowledge_base)
+        self.ingest_workflow(config, knowledge_base, data_source)
 
-    def knowledge_base(self, config: Config) -> bedrock.CfnKnowledgeBase:
+    def knowledge_base(
+        self, config: Config
+    ) -> tuple[bedrock.CfnKnowledgeBase, bedrock.CfnDataSource]:
         """The corpus bucket and a MANAGED knowledge base reading it through the S3 connector."""
         kb, ds = bedrock.CfnKnowledgeBase, bedrock.CfnDataSource
         bucket = s3.Bucket(
@@ -152,7 +158,7 @@ class DemoStack(cdk.Stack):
         cdk.CfnOutput(self, "BucketName", value=bucket.bucket_name)
         cdk.CfnOutput(self, "KnowledgeBaseId", value=knowledge_base.attr_knowledge_base_id)
         cdk.CfnOutput(self, "DataSourceId", value=data_source.attr_data_source_id)
-        return knowledge_base
+        return knowledge_base, data_source
 
     def api(self, config: Config, knowledge_base: bedrock.CfnKnowledgeBase) -> None:
         """POST /ask: IAM-authorised and throttled, answered by a Lambda wrapping the Searcher."""
@@ -238,6 +244,46 @@ class DemoStack(cdk.Stack):
 
         cdk.CfnOutput(self, "ApiUrl", value=stage.url)
         cdk.CfnOutput(self, "FunctionName", value=function.function_name)
+
+    def ingest_workflow(
+        self,
+        config: Config,
+        knowledge_base: bedrock.CfnKnowledgeBase,
+        data_source: bedrock.CfnDataSource,
+    ) -> None:
+        """Ingest the corpus and check every file was indexed, by SDK integrations alone."""
+        role = iam.Role(
+            self,
+            "IngestRole",
+            role_name=f"{config.workflow_name}-role",
+            assumed_by=iam.ServicePrincipal(
+                "states.amazonaws.com",
+                conditions={"StringEquals": {"aws:SourceAccount": self.account}},
+            ),
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:StartIngestionJob",
+                    "bedrock:GetIngestionJob",
+                    "bedrock:ListKnowledgeBaseDocuments",
+                ],
+                resources=[knowledge_base.attr_knowledge_base_arn],
+            )
+        )
+        workflow = sfn.StateMachine(
+            self,
+            "Ingest",
+            state_machine_name=config.workflow_name,
+            state_machine_type=sfn.StateMachineType.STANDARD,
+            definition_body=sfn.DefinitionBody.from_string(json.dumps(DEFINITION)),
+            definition_substitutions={
+                "KnowledgeBaseId": knowledge_base.attr_knowledge_base_id,
+                "DataSourceId": data_source.attr_data_source_id,
+            },
+            role=role,
+        )
+        cdk.CfnOutput(self, "IngestWorkflowArn", value=workflow.state_machine_arn)
 
 
 class CiStack(cdk.Stack):
