@@ -9,8 +9,9 @@ import boto3
 import uvicorn
 
 from kb_demo.config import Config
+from kb_demo.remote import ApiSearcher
 from kb_demo.resources import Clients, SetupError, Status, setup, status, teardown
-from kb_demo.search import Searcher
+from kb_demo.search import Answerer, Searcher
 from kb_demo.web import create_app
 
 STATISTICS = {
@@ -85,9 +86,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if command == "serve":
-        kb = status(clients, config).knowledge_base
-        searcher = None
-        if kb and kb.status == "ACTIVE":
+        searcher: Answerer | None = None
+        if config.api_url:
+            session = boto3.Session(profile_name=config.profile, region_name=config.region)
+            searcher = ApiSearcher(config.api_url, session.get_credentials(), region=config.region)
+            print(f"Asking the API at {config.api_url}, signed as profile {config.profile}")
+        elif (kb := status(clients, config).knowledge_base) and kb.status == "ACTIVE":
             searcher = make_searcher(config, kb.id)
             print(f"Knowledge base {kb.id}, model {config.model_id}")
         else:

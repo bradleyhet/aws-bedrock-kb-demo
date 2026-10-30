@@ -38,3 +38,7 @@ dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.3",
 ]
+infra = [
+    "aws-cdk-lib>=2.275.0",
+    "constructs>=10.8.1",
+]

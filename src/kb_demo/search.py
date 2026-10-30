@@ -1,8 +1,9 @@
 """Answer a question from the knowledge base: Retrieve the passages, then Converse over them."""
 
 import re
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from typing import Any, Protocol, Self
 
 from botocore.exceptions import ClientError
 
@@ -36,6 +37,20 @@ class Answer:
         """The passages the answer cites, by number; citations of no passage are dropped."""
         numbers = sorted({int(number) for number in CITATION.findall(self.text or "")})
         return {n: self.passages[n - 1] for n in numbers if 1 <= n <= len(self.passages)}
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> Self:
+        passages = [Passage(**passage) for passage in data["passages"]]
+        return cls(data["question"], passages, data.get("text"), data.get("unavailable"))
+
+
+class Answerer(Protocol):
+    """Anything the page can ask: the Searcher itself, or the deployed API in front of it."""
+
+    def answer(self, question: str) -> Answer: ...
 
 
 class Searcher:

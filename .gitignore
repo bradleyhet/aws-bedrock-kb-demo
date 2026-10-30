@@ -8,6 +8,9 @@ dist/
 build/
 *.egg-info/
 
+# CDK synth output
+cdk.out/
+
 # Local environment files (credentials come from aws login, never files)
 .env
 .env.*

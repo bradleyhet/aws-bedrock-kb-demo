@@ -14,6 +14,7 @@ from botocore import xform_name
 from botocore.exceptions import ClientError, ParamValidationError
 from botocore.validate import ParamValidator
 
+from kb_demo.handler import handle
 from kb_demo.resources import Clients
 
 _MODELS = botocore.session.get_session()
@@ -427,6 +428,23 @@ class FakeBedrock(FakeService):
             "stopReason": "end_turn",
             "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2},
         }
+
+
+class FakeApi:
+    """The deployed HTTP API: it runs the real handler, or refuses as the test says."""
+
+    def __init__(self, searcher: Any) -> None:
+        self.searcher = searcher
+        self.requests: list[Any] = []
+        self.refuse: tuple[int, bytes] | None = None  # (status, body) to answer every request with
+
+    def send(self, request: Any) -> tuple[int, bytes]:
+        self.requests.append(request)
+        if self.refuse:
+            return self.refuse
+        event = {"version": "2.0", "body": request.body.decode(), "isBase64Encoded": False}
+        response = handle(event, self.searcher)
+        return response["statusCode"], response["body"].encode()
 
 
 class FakeAws:

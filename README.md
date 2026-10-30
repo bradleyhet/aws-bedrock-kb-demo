@@ -25,6 +25,9 @@ corpus/*.md ──(kb-demo setup)──> S3 bucket ──> managed data source �
                                                                                    │
 browser ──> FastAPI on 127.0.0.1:8000 ── Retrieve ──> top 5 passages (file, score, text)
                                      └── Converse ──> answer citing [1]..[n]
+
+optionally, with KB_DEMO_API_URL set:
+browser ──> FastAPI on 127.0.0.1 ──SigV4──> HTTP API (IAM auth) ──> Lambda ──> Retrieve, Converse
 ```
 
 - **Setup** creates, or finds by name, an S3 bucket for the corpus, an IAM role the knowledge base
@@ -43,6 +46,13 @@ browser ──> FastAPI on 127.0.0.1:8000 ── Retrieve ──> top 5 passages
   prompt in our hands is the point of the second call.
 - **Search still works without the model.** If Converse fails (no model access, throttling, a bad
   model ID), the page shows the passages with a notice saying why there is no answer.
+- **The same search, deployed.** A CDK stack puts the search behind `POST /ask` on an API Gateway
+  HTTP API. The route requires IAM authorisation, so every call must be SigV4-signed by an identity
+  allowed to invoke it, and the stage is throttled to 2 requests a second (burst 5). The Lambda's
+  role can call Retrieve on this one knowledge base and InvokeModel on this one model's inference
+  profile and the model in the two Regions the profile routes to, and write to its own log group;
+  nothing else. With `KB_DEMO_API_URL` set, `kb-demo serve` signs its calls with your profile and
+  asks the API instead of Bedrock.
 - The page has no JavaScript, and its light and dark themes follow the system setting.
 
 ## Run it
@@ -67,9 +77,23 @@ boto3 reads `aws login` credentials only with its CRT extra, which is why the de
 |---|---|---|
 | `KB_DEMO_PROFILE` | `triage` | AWS CLI profile |
 | `KB_DEMO_MODEL_ID` | `au.anthropic.claude-haiku-4-5-20251001-v1:0` | Model for Converse |
+| `KB_DEMO_API_URL` | unset | The deployed API; when set, the page asks it instead of Bedrock |
 
 The default model is Claude Haiku 4.5 because Haiku 5.5's quota on the account this was built on is
 still 0. Once it isn't, set `KB_DEMO_MODEL_ID=au.anthropic.claude-haiku-5-5`.
+
+### Deploy the API
+
+This also needs Node.js for the CDK CLI, and a CDK-bootstrapped account and Region. The knowledge
+base still comes from `kb-demo setup`, so pass its ID (from `kb-demo status`) as context:
+
+```bash
+bunx aws-cdk@2.1146.1 deploy -c knowledge_base_id=<id> --profile triage   # npx works too
+KB_DEMO_API_URL=<ApiUrl output> uv run kb-demo serve
+```
+
+The python3.12 Lambda runtime's own boto3 is too old for managed knowledge bases, so the function
+gets the boto3 and botocore versions `uv.lock` pins, in a layer that `uv` builds at synth time.
 
 ## Measured results
 
@@ -95,6 +119,20 @@ Measured on 28 October 2026 against the real account, with Haiku 4.5:
   cover, got "The handbook doesn't cover that." With a bad model ID, Converse raised
   `ValidationException` and the page showed the notice and all five passages.
 
+- **The API,** measured on 30 October 2026:
+  - The first `cdk deploy` took 78.6 s, 58.7 s of it CloudFormation.
+  - The python3.12 runtime's bundled boto3 was 1.42.97, which rejected `managedSearchConfiguration`
+    with a ParamValidationError. With boto3 1.43.120 in the layer, it works.
+  - An unsigned `POST /ask` got 403 `{"message":"Forbidden"}`.
+  - Signed, each sample question cited its expected file, and "What is the boiling point of
+    mercury?" got "The handbook doesn't cover that."
+  - Latency, from Lambda's REPORT lines and from the client on the build machine:
+
+    | Call | Lambda | Round trip |
+    |---|---|---|
+    | Cold (first after deploy) | 758 ms init + 1,865 ms | 3.24 s |
+    | Warm, 8 calls | median 962 ms (902 ms to 4,415 ms) | median 1.31 s (1.25 s to 4.77 s) |
+
 ## Cost
 
 The managed knowledge base's list prices as of 28 October 2026
@@ -108,10 +146,10 @@ The managed knowledge base's list prices as of 28 October 2026
 Converse is billed per token at the model's price, and S3 storage for a corpus this size is
 negligible.
 
-**Measured cost: not yet measured.** To measure it, activate `Project` as a cost allocation tag
-(Billing and Cost Management, Cost allocation tags; it only applies from activation onwards), then
-filter Cost Explorer by `Project = kb-demo` once a day of data exists. Model costs are tagged
-through an application inference profile
+**Measured cost: not yet measured.** `Project` was activated as a cost allocation tag on
+30 October 2026, with a backfill requested from 1 October so usage since setup counts too. Once the
+backfill finishes, the figure comes from Cost Explorer filtered by `Project = kb-demo`. Model costs
+are tagged through an application inference profile
 ([inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles.html)),
 and this demo calls the system-defined cross-Region profile directly, so Converse costs appear
 under Bedrock model usage rather than under the tag.
@@ -119,8 +157,11 @@ under Bedrock model usage rather than under the tag.
 ## Tear it down
 
 ```bash
+bunx aws-cdk@2.1146.1 destroy -c knowledge_base_id=<id> --profile triage   # if the API is deployed
 uv run kb-demo teardown
 ```
+
+`cdk destroy` leaves the account's CDK bootstrap stack (`CDKToolkit`) in place.
 
 Teardown deletes the data source, waits for it to go, deletes the knowledge base and waits again,
 then empties and deletes the bucket and deletes the role. Expect it to take around 12 minutes,
@@ -139,20 +180,23 @@ The tests make no AWS calls. In-memory fakes stand in for S3, IAM, `bedrock-agen
 `bedrock-agent-runtime` and `bedrock-runtime`, and they check every call's parameters against
 botocore's service models, so a misspelt or misplaced parameter fails in a test the way it would
 against AWS. Setup, teardown and status are tested end to end over the fakes, as are the search
-and the web page.
+and the web page. The Lambda handler is tested on HTTP API events, and the signing client is tested
+against a fake API that checks its SigV4 headers and runs the real handler.
 
 ## What this doesn't show
 
 - **Scale.** Eight files, about 13 KB. Nothing here says how retrieval quality or ingestion time
   hold up over thousands of documents.
-- **Access control.** The page has no sign-in and listens on 127.0.0.1 only. Everyone who can reach
-  it sees every document; there is no per-user filtering.
+- **Access control.** The page has no sign-in and listens on 127.0.0.1 only. The API admits only
+  signed callers with permission to invoke it, but whoever it admits sees every document; there is
+  no per-user filtering.
 - **Other connectors.** Only S3. Managed knowledge bases also connect to SharePoint, Confluence,
   Google Drive, Salesforce and others.
 - **Evaluation.** Three sample questions and one off-corpus question, checked by script. There is
   no evaluation set or scoring.
 - **Conversation.** Each question stands alone, with no follow-ups and no streaming.
-- **Infrastructure as code.** Setup and teardown are boto3, because no CloudFormation or CDK
+- **Infrastructure as code, for the knowledge base.** The API is CDK. The bucket, role, knowledge
+  base and data source are still boto3 setup and teardown, because no CloudFormation or CDK
   resource for managed knowledge bases was found.
 
 ## Layout
@@ -165,5 +209,8 @@ src/kb_demo/search.py       Retrieve, then Converse; passages, answers, citation
 src/kb_demo/web.py          the FastAPI app; templates/index.html is the page
 src/kb_demo/samples.py      the three sample questions and the fact each depends on
 src/kb_demo/cli.py          the kb-demo command
+src/kb_demo/handler.py      the Lambda handler behind POST /ask
+src/kb_demo/remote.py       the SigV4-signing client the page uses when KB_DEMO_API_URL is set
+infra/app.py, cdk.json      the CDK app: HTTP API, Lambda, its role, SDK layer and log group
 tests/                      unit tests over in-memory AWS fakes
 ```

@@ -9,8 +9,9 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from markupsafe import Markup, escape
 
+from kb_demo.remote import ApiError
 from kb_demo.samples import SAMPLES
-from kb_demo.search import CITATION, Answer, Searcher
+from kb_demo.search import CITATION, Answer, Answerer
 
 TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -30,7 +31,7 @@ def cite(answer: Answer) -> Markup:
 TEMPLATES.env.filters["cite"] = cite
 
 
-def create_app(searcher: Searcher | None) -> FastAPI:
+def create_app(searcher: Answerer | None) -> FastAPI:
     app = FastAPI(title="kb-demo")
 
     def page(request: Request, status_code: int = 200, **context: object) -> HTMLResponse:
@@ -47,6 +48,10 @@ def create_app(searcher: Searcher | None) -> FastAPI:
             return page(request, 503)
         if not (question := question.strip()):
             return page(request, 400, message="Type a question first.")
-        return page(request, question=question, answer=searcher.answer(question))
+        try:
+            answer = searcher.answer(question)
+        except ApiError as error:
+            return page(request, 502, question=question, message=str(error))
+        return page(request, question=question, answer=answer)
 
     return app

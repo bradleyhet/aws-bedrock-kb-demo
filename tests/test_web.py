@@ -1,11 +1,15 @@
 import pytest
+from botocore.credentials import Credentials
 from fastapi.testclient import TestClient
 from markupsafe import escape
 
+from kb_demo.remote import ApiSearcher
 from kb_demo.samples import SAMPLES
 from kb_demo.search import Searcher
 from kb_demo.web import create_app
-from tests.fakes import FakeAws, retrieval_result
+from tests.fakes import FakeApi, FakeAws, retrieval_result
+
+API_URL = "https://abc123.execute-api.ap-southeast-2.amazonaws.com/"
 
 
 @pytest.fixture
@@ -66,6 +70,19 @@ def test_an_empty_question_returns_400_without_calling_aws(aws, client, question
     assert page.status_code == 400
     assert "Type a question first." in page.text
     assert aws.runtime.requests == aws.bedrock.requests == []
+
+
+def test_an_api_refusal_shows_why_and_returns_502():
+    api = FakeApi(searcher=None)
+    api.refuse = (403, b'{"message":"Forbidden"}')
+    credentials = Credentials("AKIDEXAMPLE", "not-a-secret")
+    remote = ApiSearcher(API_URL, credentials, region="ap-southeast-2", send=api.send)
+    client = TestClient(create_app(remote))
+
+    page = client.post("/ask", data={"question": "Hotel limit in Perth?"})
+
+    assert page.status_code == 502
+    assert "The API answered 403: Forbidden" in page.text
 
 
 def test_without_a_knowledge_base_the_page_says_to_run_setup_first():

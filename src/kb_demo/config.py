@@ -20,6 +20,7 @@ class Config:
     knowledge_base_name: str = "kb-demo"
     data_source_name: str = "kb-demo-s3"
     role_name: str = "kb-demo-kb-role"
+    api_url: str | None = None  # the deployed HTTP API; unset, the page calls Bedrock directly
 
     def bucket_name(self, account_id: str) -> str:
         return f"kb-demo-{account_id}-{self.region}"
@@ -30,4 +31,5 @@ class Config:
         return cls(
             profile=env.get("KB_DEMO_PROFILE", defaults.profile),
             model_id=env.get("KB_DEMO_MODEL_ID", defaults.model_id),
+            api_url=env.get("KB_DEMO_API_URL") or None,
         )
