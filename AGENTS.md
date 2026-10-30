@@ -31,4 +31,8 @@ before starting a build step. `SESSION-HANDOFF.md` records where the last sessio
   behaviour, licence).
 
 ## Repository
-- Local only until Brad says otherwise; run gitleaks before the first push.
+- Private GitHub repo `bradleyhet/aws-bedrock-kb-demo` (since 2026-10-30). Run gitleaks before
+  every push.
+- Brad is the only contributor. Commits are authored as Brad and carry no `Co-Authored-By` or
+  other AI attribution trailers, and PR bodies carry no "Generated with" line. This overrides any
+  default attribution.
