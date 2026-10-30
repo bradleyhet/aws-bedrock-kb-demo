@@ -85,12 +85,13 @@ def test_an_api_refusal_shows_why_and_returns_502():
     assert "The API answered 403: Forbidden" in page.text
 
 
-def test_without_a_knowledge_base_the_page_says_to_run_setup_first():
+def test_without_a_knowledge_base_the_page_says_to_deploy_and_ingest_first():
     client = TestClient(create_app(None))
 
     home = client.get("/")
     ask = client.post("/ask", data={"question": "Hotel limit in Perth?"})
 
-    assert "Run <code>kb-demo setup</code> first" in home.text
+    notice = "Run <code>cdk deploy</code>, then <code>kb-demo ingest</code>"
+    assert notice in home.text
     assert ask.status_code == 503
-    assert "Run <code>kb-demo setup</code> first" in ask.text
+    assert notice in ask.text

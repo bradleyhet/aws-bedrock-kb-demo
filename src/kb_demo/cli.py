@@ -1,4 +1,4 @@
-"""kb-demo: set up, serve, inspect and tear down the knowledge base demo."""
+"""kb-demo: load the corpus into the deployed stack, serve the page, and inspect the stack."""
 
 import argparse
 import logging
@@ -10,7 +10,7 @@ import uvicorn
 
 from kb_demo.config import Config
 from kb_demo.remote import ApiSearcher
-from kb_demo.resources import Clients, SetupError, Status, setup, status, teardown
+from kb_demo.resources import Clients, IngestError, Status, ingest, status
 from kb_demo.search import Answerer, Searcher
 from kb_demo.web import create_app
 
@@ -63,7 +63,7 @@ def print_status(found: Status, config: Config) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kb-demo", description=__doc__)
-    parser.add_argument("command", choices=["setup", "serve", "status", "teardown"])
+    parser.add_argument("command", choices=["ingest", "serve", "status"])
     parser.add_argument("--port", type=int, default=8000, help="port for serve (default 8000)")
     args = parser.parse_args(argv)
     command = args.command
@@ -73,11 +73,11 @@ def main(argv: list[str] | None = None) -> int:
     config = Config.from_env()
     clients = make_clients(config)
 
-    if command == "setup":
+    if command == "ingest":
         try:
-            report = setup(clients, config)
-        except SetupError as error:
-            print(f"Setup failed: {error}", file=sys.stderr)
+            report = ingest(clients, config)
+        except IngestError as error:
+            print(f"Ingest failed: {error}", file=sys.stderr)
             return 1
         print(f"Knowledge base {report.knowledge_base_id}, data source {report.data_source_id}")
         print(f"Ingestion: {describe(report.statistics)}")
@@ -95,18 +95,13 @@ def main(argv: list[str] | None = None) -> int:
             searcher = make_searcher(config, kb.id)
             print(f"Knowledge base {kb.id}, model {config.model_id}")
         else:
-            print("No ACTIVE knowledge base named kb-demo; the page will say to run setup first.")
+            print("No ACTIVE knowledge base named kb-demo; the page will say to deploy it first.")
         # Local only: the page has no authentication.
         uvicorn.run(create_app(searcher), host="127.0.0.1", port=args.port)
         return 0
 
-    if command == "status":
-        print_status(status(clients, config), config)
-        return 0
-
-    remaining = teardown(clients, config)
-    print_status(remaining, config)
-    return 0 if remaining == Status() else 1
+    print_status(status(clients, config), config)
+    return 0
 
 
 if __name__ == "__main__":

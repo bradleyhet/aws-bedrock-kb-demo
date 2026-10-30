@@ -1,7 +1,8 @@
-"""CDK app: POST /ask on an HTTP API that requires IAM authorisation, answered by a Lambda.
+"""CDK app: the whole demo as one stack.
 
-The knowledge base is still made by `kb-demo setup`, so pass its ID as context:
-    cdk deploy -c knowledge_base_id=<id from kb-demo status>
+The corpus bucket, the knowledge base and its data source, and POST /ask on an HTTP API that
+requires IAM authorisation, answered by a Lambda. After cdk deploy, `kb-demo ingest` uploads the
+corpus and ingests it.
 """
 
 import os
@@ -13,9 +14,11 @@ from typing import Any
 import aws_cdk as cdk
 import jsii
 from aws_cdk import aws_apigatewayv2 as apigw
+from aws_cdk import aws_bedrock as bedrock
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
+from aws_cdk import aws_s3 as s3
 from aws_cdk.aws_apigatewayv2_authorizers import HttpIamAuthorizer
 from aws_cdk.aws_apigatewayv2_integrations import HttpLambdaIntegration
 from constructs import Construct
@@ -43,11 +46,103 @@ class UvInstall:
         return True
 
 
-class ApiStack(cdk.Stack):
-    def __init__(
-        self, scope: Construct, config: Config, knowledge_base_id: str, **kwargs: object
-    ) -> None:
+class DemoStack(cdk.Stack):
+    def __init__(self, scope: Construct, config: Config, **kwargs: object) -> None:
         super().__init__(scope, "kb-demo", **kwargs)
+        knowledge_base = self.knowledge_base(config)
+        self.api(config, knowledge_base)
+
+    def knowledge_base(self, config: Config) -> bedrock.CfnKnowledgeBase:
+        """The corpus bucket and a MANAGED knowledge base reading it through the S3 connector."""
+        kb, ds = bedrock.CfnKnowledgeBase, bedrock.CfnDataSource
+        bucket = s3.Bucket(
+            self,
+            "Corpus",
+            bucket_name=config.bucket_name(self.account),
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+            auto_delete_objects=True,  # so cdk destroy can delete it with the corpus inside
+        )
+        # The auto-delete handler would otherwise make its own log group, which CloudFormation
+        # doesn't own, so cdk destroy left it behind (2026-10-30). Give it one the stack owns.
+        auto_delete_logs = logs.LogGroup(
+            self,
+            "AutoDeleteLogs",
+            log_group_name="/aws/lambda/kb-demo-auto-delete-objects",
+            retention=logs.RetentionDays.ONE_WEEK,
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+        )
+        provider = self.node.find_child("Custom::S3AutoDeleteObjectsCustomResourceProvider")
+        handler = provider.node.find_child("Handler")
+        handler.add_property_override("LoggingConfig.LogGroup", auto_delete_logs.log_group_name)
+        # Inline, so the policy exists before the knowledge base that depends on the role.
+        read_corpus = iam.PolicyDocument(
+            statements=[
+                iam.PolicyStatement(actions=["s3:ListBucket"], resources=[bucket.bucket_arn]),
+                iam.PolicyStatement(
+                    actions=["s3:GetObject"], resources=[bucket.arn_for_objects("*")]
+                ),
+            ]
+        )
+        role = iam.Role(
+            self,
+            "KnowledgeBaseRole",
+            role_name=config.role_name,
+            description="Lets the kb-demo knowledge base read its corpus bucket",
+            assumed_by=iam.ServicePrincipal(
+                "bedrock.amazonaws.com",
+                conditions={"StringEquals": {"aws:SourceAccount": self.account}},
+            ),
+            inline_policies={"kb-demo-s3-read": read_corpus},
+        )
+        knowledge_base = kb(
+            self,
+            "KnowledgeBase",
+            name=config.knowledge_base_name,
+            description="kb-demo: a fictional field-services handbook",
+            role_arn=role.role_arn,
+            knowledge_base_configuration=kb.KnowledgeBaseConfigurationProperty(
+                type="MANAGED",
+                managed_knowledge_base_configuration=kb.ManagedKnowledgeBaseConfigurationProperty(
+                    embedding_model_type="MANAGED"
+                ),
+            ),
+        )
+        # The connector parameters setup sent through boto3, which worked on this account.
+        connector = {
+            "type": "S3",
+            "version": "1",
+            "connectionConfiguration": {
+                "bucketName": bucket.bucket_name,
+                "bucketOwnerAccountId": self.account,
+            },
+            "deletionProtectionConfiguration": {"enableDeletionProtection": False},
+        }
+        data_source = ds(
+            self,
+            "DataSource",
+            knowledge_base_id=knowledge_base.attr_knowledge_base_id,
+            name=config.data_source_name,
+            description="kb-demo corpus bucket",
+            data_deletion_policy="DELETE",
+            data_source_configuration=ds.DataSourceConfigurationProperty(
+                type="MANAGED_KNOWLEDGE_BASE_CONNECTOR",
+                managed_knowledge_base_connector_configuration=(
+                    ds.ManagedKnowledgeBaseConnectorConfigurationProperty(
+                        connector_parameters=connector
+                    )
+                ),
+            ),
+        )
+        cdk.CfnOutput(self, "BucketName", value=bucket.bucket_name)
+        cdk.CfnOutput(self, "KnowledgeBaseId", value=knowledge_base.attr_knowledge_base_id)
+        cdk.CfnOutput(self, "DataSourceId", value=data_source.attr_data_source_id)
+        return knowledge_base
+
+    def api(self, config: Config, knowledge_base: bedrock.CfnKnowledgeBase) -> None:
+        """POST /ask: IAM-authorised and throttled, answered by a Lambda wrapping the Searcher."""
         model = config.model_id.split(".", 1)[1]  # the profile ID without its geography prefix
 
         log_group = logs.LogGroup(
@@ -65,9 +160,6 @@ class ApiStack(cdk.Stack):
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
         )
         log_group.grant_write(role)
-        knowledge_base = self.format_arn(
-            service="bedrock", resource="knowledge-base", resource_name=knowledge_base_id
-        )
         profile = self.format_arn(
             service="bedrock", resource="inference-profile", resource_name=config.model_id
         )
@@ -75,7 +167,9 @@ class ApiStack(cdk.Stack):
             f"arn:aws:bedrock:{region}::foundation-model/{model}" for region in PROFILE_REGIONS
         ]
         role.add_to_policy(
-            iam.PolicyStatement(actions=["bedrock:Retrieve"], resources=[knowledge_base])
+            iam.PolicyStatement(
+                actions=["bedrock:Retrieve"], resources=[knowledge_base.attr_knowledge_base_arn]
+            )
         )
         role.add_to_policy(
             iam.PolicyStatement(actions=["bedrock:InvokeModel"], resources=[profile, *models])
@@ -115,7 +209,7 @@ class ApiStack(cdk.Stack):
             role=role,
             log_group=log_group,
             environment={
-                "KB_DEMO_KNOWLEDGE_BASE_ID": knowledge_base_id,
+                "KB_DEMO_KNOWLEDGE_BASE_ID": knowledge_base.attr_knowledge_base_id,
                 "KB_DEMO_MODEL_ID": config.model_id,
             },
         )
@@ -144,12 +238,9 @@ class ApiStack(cdk.Stack):
 
 def main() -> None:
     app = cdk.App()
-    knowledge_base_id = app.node.try_get_context("knowledge_base_id")
-    if not knowledge_base_id:
-        raise SystemExit("Pass -c knowledge_base_id=<id>; `uv run kb-demo status` shows it.")
     config = Config.from_env()
     env = cdk.Environment(account=os.environ.get("CDK_DEFAULT_ACCOUNT"), region=config.region)
-    ApiStack(app, config, knowledge_base_id, env=env)
+    DemoStack(app, config, env=env)
     for key, value in TAGS.items():
         cdk.Tags.of(app).add(key, value)
     app.synth()

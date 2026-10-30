@@ -6,7 +6,6 @@ code under test has to wait for them.
 """
 
 import itertools
-import json
 from typing import Any
 
 import botocore.session
@@ -14,11 +13,11 @@ from botocore import xform_name
 from botocore.exceptions import ClientError, ParamValidationError
 from botocore.validate import ParamValidator
 
+from kb_demo.config import Config
 from kb_demo.handler import handle
 from kb_demo.resources import Clients
 
 _MODELS = botocore.session.get_session()
-_GONE = None  # in a record's "next" statuses: the record disappears on that poll
 
 
 class FakeClock:
@@ -78,7 +77,6 @@ class FakeS3(FakeService):
     def __init__(self, aws: "FakeAws") -> None:
         super().__init__(aws)
         self.buckets: dict[str, dict[str, bytes]] = {}
-        self.tags: dict[str, dict[str, str]] = {}
 
     def _bucket(self, method: str, name: str) -> dict[str, bytes]:
         if name not in self.buckets:
@@ -89,21 +87,6 @@ class FakeS3(FakeService):
         self._call("head_bucket", params)
         if params["Bucket"] not in self.buckets:
             raise self._error("head_bucket", "404")
-        return {}
-
-    def create_bucket(self, **params: Any) -> dict[str, Any]:
-        self._call("create_bucket", params)
-        if params["Bucket"] in self.buckets:
-            raise self._error("create_bucket", "BucketAlreadyOwnedByYou")
-        if params.get("CreateBucketConfiguration", {}).get("LocationConstraint") != self.aws.region:
-            raise self._error("create_bucket", "IllegalLocationConstraintException")
-        self.buckets[params["Bucket"]] = {}
-        return {"Location": f"http://{params['Bucket']}.s3.amazonaws.com/"}
-
-    def put_bucket_tagging(self, **params: Any) -> dict[str, Any]:
-        self._call("put_bucket_tagging", params)
-        self._bucket("put_bucket_tagging", params["Bucket"])
-        self.tags[params["Bucket"]] = {t["Key"]: t["Value"] for t in params["Tagging"]["TagSet"]}
         return {}
 
     def put_object(self, **params: Any) -> dict[str, Any]:
@@ -126,65 +109,19 @@ class FakeS3(FakeService):
             bucket.pop(item["Key"], None)
         return {}
 
-    def delete_bucket(self, **params: Any) -> dict[str, Any]:
-        self._call("delete_bucket", params)
-        if self._bucket("delete_bucket", params["Bucket"]):
-            raise self._error("delete_bucket", "BucketNotEmpty")
-        del self.buckets[params["Bucket"]]
-        self.tags.pop(params["Bucket"], None)
-        return {}
-
 
 class FakeIam(FakeService):
     service_name = "iam"
 
     def __init__(self, aws: "FakeAws") -> None:
         super().__init__(aws)
-        self.roles: dict[str, dict[str, Any]] = {}
-
-    def _role(self, method: str, name: str) -> dict[str, Any]:
-        if name not in self.roles:
-            raise self._error(method, "NoSuchEntity")
-        return self.roles[name]
+        self.roles: dict[str, str] = {}  # name -> ARN
 
     def get_role(self, **params: Any) -> dict[str, Any]:
         self._call("get_role", params)
-        role = self._role("get_role", params["RoleName"])
-        return {"Role": {"RoleName": params["RoleName"], "Arn": role["Arn"]}}
-
-    def create_role(self, **params: Any) -> dict[str, Any]:
-        self._call("create_role", params)
-        name = params["RoleName"]
-        if name in self.roles:
-            raise self._error("create_role", "EntityAlreadyExists")
-        self.roles[name] = {
-            "Arn": f"arn:aws:iam::{self.aws.account_id}:role/{name}",
-            "Trust": json.loads(params["AssumeRolePolicyDocument"]),
-            "Tags": {tag["Key"]: tag["Value"] for tag in params.get("Tags", [])},
-            "Policies": {},
-        }
-        return {"Role": {"RoleName": name, "Arn": self.roles[name]["Arn"]}}
-
-    def put_role_policy(self, **params: Any) -> dict[str, Any]:
-        self._call("put_role_policy", params)
-        role = self._role("put_role_policy", params["RoleName"])
-        role["Policies"][params["PolicyName"]] = json.loads(params["PolicyDocument"])
-        return {}
-
-    def delete_role_policy(self, **params: Any) -> dict[str, Any]:
-        self._call("delete_role_policy", params)
-        policies = self._role("delete_role_policy", params["RoleName"])["Policies"]
-        if params["PolicyName"] not in policies:
-            raise self._error("delete_role_policy", "NoSuchEntity")
-        del policies[params["PolicyName"]]
-        return {}
-
-    def delete_role(self, **params: Any) -> dict[str, Any]:
-        self._call("delete_role", params)
-        if self._role("delete_role", params["RoleName"])["Policies"]:
-            raise self._error("delete_role", "DeleteConflict")
-        del self.roles[params["RoleName"]]
-        return {}
+        if params["RoleName"] not in self.roles:
+            raise self._error("get_role", "NoSuchEntity")
+        return {"Role": {"RoleName": params["RoleName"], "Arn": self.roles[params["RoleName"]]}}
 
 
 class FakeAgent(FakeService):
@@ -213,11 +150,7 @@ class FakeAgent(FakeService):
         if record is None:
             raise self._error(method, "ResourceNotFoundException")
         if record["next"]:
-            status = record["next"].pop(0)
-            if status is _GONE:
-                del table[key]
-                raise self._error(method, "ResourceNotFoundException")
-            record["status"] = status
+            record["status"] = record["next"].pop(0)
         return record
 
     def _knowledge_base(self, method: str, kb_id: str) -> dict[str, Any]:
@@ -259,20 +192,9 @@ class FakeAgent(FakeService):
         }
         return {"knowledgeBase": self._kb_view(self.knowledge_bases[kb_id])}
 
-    def get_knowledge_base(self, **params: Any) -> dict[str, Any]:
-        self._call("get_knowledge_base", params)
-        record = self._poll(self.knowledge_bases, params["knowledgeBaseId"], "get_knowledge_base")
-        return {"knowledgeBase": self._kb_view(record)}
-
     def list_knowledge_bases(self, **params: Any) -> dict[str, Any]:
         self._call("list_knowledge_bases", params)
         return {"knowledgeBaseSummaries": [self._kb_view(r) for r in self.knowledge_bases.values()]}
-
-    def delete_knowledge_base(self, **params: Any) -> dict[str, Any]:
-        self._call("delete_knowledge_base", params)
-        record = self._knowledge_base("delete_knowledge_base", params["knowledgeBaseId"])
-        record["status"], record["next"] = "DELETING", ["DELETING", _GONE]
-        return {"knowledgeBaseId": params["knowledgeBaseId"], "status": "DELETING"}
 
     def create_data_source(self, **params: Any) -> dict[str, Any]:
         self._call("create_data_source", params)
@@ -292,12 +214,6 @@ class FakeAgent(FakeService):
         }
         return {"dataSource": self._ds_view(self.data_sources[ds_id])}
 
-    def get_data_source(self, **params: Any) -> dict[str, Any]:
-        self._call("get_data_source", params)
-        self._data_source("get_data_source", params["knowledgeBaseId"], params["dataSourceId"])
-        record = self._poll(self.data_sources, params["dataSourceId"], "get_data_source")
-        return {"dataSource": self._ds_view(record)}
-
     def list_data_sources(self, **params: Any) -> dict[str, Any]:
         self._call("list_data_sources", params)
         self._knowledge_base("list_data_sources", params["knowledgeBaseId"])
@@ -307,15 +223,6 @@ class FakeAgent(FakeService):
             if record["knowledgeBaseId"] == params["knowledgeBaseId"]
         ]
         return {"dataSourceSummaries": sources}
-
-    def delete_data_source(self, **params: Any) -> dict[str, Any]:
-        self._call("delete_data_source", params)
-        kb_id, ds_id = params["knowledgeBaseId"], params["dataSourceId"]
-        record = self._data_source("delete_data_source", kb_id, ds_id)
-        record["status"], record["next"] = "DELETING", ["DELETING", _GONE]
-        self.documents.pop(ds_id, None)
-        self._ingested.pop(ds_id, None)
-        return {"knowledgeBaseId": kb_id, "dataSourceId": ds_id, "status": "DELETING"}
 
     def start_ingestion_job(self, **params: Any) -> dict[str, Any]:
         self._call("start_ingestion_job", params)
@@ -460,3 +367,33 @@ class FakeAws:
 
     def clients(self) -> Clients:
         return Clients(sts=self.sts, s3=self.s3, iam=self.iam, agent=self.agent)
+
+    def deploy(self, config: Config) -> None:
+        """What cdk deploy leaves: an empty bucket, the role, an ACTIVE knowledge base and an
+        AVAILABLE data source that reads the bucket."""
+        bucket = config.bucket_name(self.account_id)
+        self.s3.buckets[bucket] = {}
+        role_arn = f"arn:aws:iam::{self.account_id}:role/{config.role_name}"
+        self.iam.roles[config.role_name] = role_arn
+        kb_id = self.agent.create_knowledge_base(
+            name=config.knowledge_base_name,
+            roleArn=role_arn,
+            knowledgeBaseConfiguration={
+                "type": "MANAGED",
+                "managedKnowledgeBaseConfiguration": {"embeddingModelType": "MANAGED"},
+            },
+        )["knowledgeBase"]["knowledgeBaseId"]
+        connection = {"bucketName": bucket, "bucketOwnerAccountId": self.account_id}
+        ds_id = self.agent.create_data_source(
+            knowledgeBaseId=kb_id,
+            name=config.data_source_name,
+            dataSourceConfiguration={
+                "type": "MANAGED_KNOWLEDGE_BASE_CONNECTOR",
+                "managedKnowledgeBaseConnectorConfiguration": {
+                    "connectorParameters": {"connectionConfiguration": connection}
+                },
+            },
+        )["dataSource"]["dataSourceId"]
+        # CloudFormation returns only once both have settled.
+        self.agent.knowledge_bases[kb_id].update(status="ACTIVE", next=[])
+        self.agent.data_sources[ds_id].update(status="AVAILABLE", next=[])

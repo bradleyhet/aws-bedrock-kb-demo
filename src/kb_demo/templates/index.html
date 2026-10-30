@@ -109,8 +109,8 @@
 
   {% if setup_needed %}
   <p class="notice" role="alert">
-    No knowledge base yet. Run <code>kb-demo setup</code> first, then restart
-    <code>kb-demo serve</code>.
+    No knowledge base yet. Run <code>cdk deploy</code>, then <code>kb-demo ingest</code>, then
+    restart <code>kb-demo serve</code>.
   </p>
   {% endif %}
   {% if message %}

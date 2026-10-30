@@ -1,6 +1,5 @@
-"""Create, inspect and delete the demo's AWS resources, each found by name so reruns are safe."""
+"""Load the corpus into the stack cdk deploy made, and report on it; everything is found by name."""
 
-import json
 import logging
 import time
 from collections.abc import Callable, Mapping
@@ -10,11 +9,10 @@ from typing import Any, NamedTuple
 
 from botocore.exceptions import ClientError
 
-from kb_demo.config import TAGS, Config
+from kb_demo.config import Config
 
 log = logging.getLogger(__name__)
 
-POLICY_NAME = "kb-demo-s3-read"
 FAILED = {"FAILED", "STOPPED", "DELETE_UNSUCCESSFUL", "UPDATE_UNSUCCESSFUL"}
 
 
@@ -47,14 +45,14 @@ class Status:
 
 
 @dataclass(frozen=True)
-class SetupReport:
+class IngestReport:
     knowledge_base_id: str
     data_source_id: str
     statistics: Mapping[str, int]
     documents: Mapping[str, str]  # corpus file name -> document status
 
 
-class SetupError(Exception):
+class IngestError(Exception):
     pass
 
 
@@ -80,30 +78,27 @@ def wait_for[T](
     return result
 
 
-def setup(
+def ingest(
     clients: Clients, config: Config, *, sleep: Sleep = time.sleep, clock: Clock = time.monotonic
-) -> SetupReport:
-    account_id = clients.sts.get_caller_identity()["Account"]
-    bucket = config.bucket_name(account_id)
+) -> IngestReport:
+    """Upload the corpus to the stack's bucket, ingest it, and check every file was indexed."""
+    found = status(clients, config)
+    kb, ds = found.knowledge_base, found.data_source
+    if not (found.bucket and kb and ds):
+        raise IngestError("the kb-demo stack isn't deployed; run cdk deploy first")
+    if (kb.status, ds.status) != ("ACTIVE", "AVAILABLE"):
+        raise IngestError(f"the knowledge base is {kb.status} and the data source {ds.status}")
     files = sorted(config.corpus_dir.glob("*.md"))
-    timing = {"sleep": sleep, "clock": clock}
 
-    log.info("Bucket %s: syncing %d corpus files", bucket, len(files))
-    _ensure_bucket(clients.s3, bucket, config.region)
-    _sync_corpus(clients.s3, bucket, files)
-    log.info("Role %s", config.role_name)
-    role_arn = _ensure_role(clients.iam, config, account_id, bucket)
-    log.info("Knowledge base %s: waiting for ACTIVE", config.knowledge_base_name)
-    kb_id = _ensure_knowledge_base(clients.agent, config, role_arn, **timing)
-    log.info("Data source %s: waiting for AVAILABLE", config.data_source_name)
-    ds_id = _ensure_data_source(clients.agent, config, kb_id, account_id, bucket, **timing)
-    log.info("Ingesting the corpus into knowledge base %s", kb_id)
-    statistics = _ingest(clients.agent, kb_id, ds_id, **timing)
-    documents = _documents(clients.agent, kb_id, ds_id)
+    log.info("Bucket %s: syncing %d corpus files", found.bucket, len(files))
+    _sync_corpus(clients.s3, found.bucket, files)
+    log.info("Ingesting the corpus into knowledge base %s", kb.id)
+    statistics = _ingest(clients.agent, kb.id, ds.id, sleep=sleep, clock=clock)
+    documents = _documents(clients.agent, kb.id, ds.id)
     problems = _ingestion_problems(statistics, documents, [file.name for file in files])
     if problems:
-        raise SetupError(f"ingestion did not index the corpus: {'; '.join(problems)}")
-    return SetupReport(kb_id, ds_id, statistics, documents)
+        raise IngestError(f"ingestion did not index the corpus: {'; '.join(problems)}")
+    return IngestReport(kb.id, ds.id, statistics, documents)
 
 
 def status(clients: Clients, config: Config) -> Status:
@@ -120,76 +115,14 @@ def status(clients: Clients, config: Config) -> Status:
     )
 
 
-def teardown(
-    clients: Clients, config: Config, *, sleep: Sleep = time.sleep, clock: Clock = time.monotonic
-) -> Status:
-    """Delete everything setup made, then report what is left: nothing, if all went well."""
-    found = status(clients, config)
-    # The step 9 drill took about 9 minutes to delete the data source, so allow 30 for each wait.
-    agent, timing = clients.agent, {"timeout": 1800, "sleep": sleep, "clock": clock}
-
-    if found.knowledge_base:
-        kb_id = found.knowledge_base.id
-        if found.data_source:
-            ds_id = found.data_source.id
-            log.info("Deleting data source %s", ds_id)
-            agent.delete_data_source(knowledgeBaseId=kb_id, dataSourceId=ds_id)
-            wait_for(
-                lambda: _gone(
-                    lambda: agent.get_data_source(knowledgeBaseId=kb_id, dataSourceId=ds_id)
-                ),
-                what="the data source to be deleted",
-                **timing,
-            )
-        log.info("Deleting knowledge base %s", kb_id)
-        agent.delete_knowledge_base(knowledgeBaseId=kb_id)
-        wait_for(
-            lambda: _gone(lambda: agent.get_knowledge_base(knowledgeBaseId=kb_id)),
-            what="the knowledge base to be deleted",
-            **timing,
-        )
-
-    if found.bucket:
-        log.info("Deleting bucket %s", found.bucket)
-        if objects := [{"Key": key} for key in _keys(clients.s3, found.bucket)]:
-            clients.s3.delete_objects(
-                Bucket=found.bucket, Delete={"Objects": objects, "Quiet": True}
-            )
-        clients.s3.delete_bucket(Bucket=found.bucket)
-
-    if found.role:
-        log.info("Deleting role %s", found.role)
-        try:
-            clients.iam.delete_role_policy(RoleName=found.role, PolicyName=POLICY_NAME)
-        except ClientError as error:
-            if _code(error) != "NoSuchEntity":
-                raise
-        clients.iam.delete_role(RoleName=found.role)
-    return status(clients, config)
-
-
 def _code(error: ClientError) -> str:
     return error.response["Error"]["Code"]
 
 
-def _tag_list() -> list[dict[str, str]]:
-    return [{"Key": key, "Value": value} for key, value in TAGS.items()]
-
-
 def _settled(status: str, *, ready: str, what: str, reasons: list[str]) -> bool:
     if status in FAILED:
-        raise SetupError(f"{what} is {status}: {'; '.join(reasons) or 'no reason given'}")
+        raise IngestError(f"{what} is {status}: {'; '.join(reasons) or 'no reason given'}")
     return status == ready
-
-
-def _gone(get: Callable[[], Any]) -> bool:
-    try:
-        get()
-    except ClientError as error:
-        if _code(error) == "ResourceNotFoundException":
-            return True
-        raise
-    return False
 
 
 def _bucket_exists(s3: Any, bucket: str) -> bool:
@@ -200,14 +133,6 @@ def _bucket_exists(s3: Any, bucket: str) -> bool:
             return False
         raise
     return True
-
-
-def _ensure_bucket(s3: Any, bucket: str, region: str) -> None:
-    if _bucket_exists(s3, bucket):
-        return
-    # New buckets get Block Public Access and SSE-S3 by default.
-    s3.create_bucket(Bucket=bucket, CreateBucketConfiguration={"LocationConstraint": region})
-    s3.put_bucket_tagging(Bucket=bucket, Tagging={"TagSet": _tag_list()})
 
 
 def _keys(s3: Any, bucket: str) -> list[str]:
@@ -235,40 +160,6 @@ def _role_arn(iam: Any, role_name: str) -> str | None:
         raise
 
 
-def _ensure_role(iam: Any, config: Config, account_id: str, bucket: str) -> str:
-    trust = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Principal": {"Service": "bedrock.amazonaws.com"},
-                "Action": "sts:AssumeRole",
-                "Condition": {"StringEquals": {"aws:SourceAccount": account_id}},
-            }
-        ],
-    }
-    read_corpus = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": f"arn:aws:s3:::{bucket}"},
-            {"Effect": "Allow", "Action": "s3:GetObject", "Resource": f"arn:aws:s3:::{bucket}/*"},
-        ],
-    }
-    arn = _role_arn(iam, config.role_name)
-    if arn is None:
-        arn = iam.create_role(
-            RoleName=config.role_name,
-            AssumeRolePolicyDocument=json.dumps(trust),
-            Description="Lets the kb-demo knowledge base read its corpus bucket",
-            Tags=_tag_list(),
-        )["Role"]["Arn"]
-    # Put the policy on every run, so a rerun also repairs it.
-    iam.put_role_policy(
-        RoleName=config.role_name, PolicyName=POLICY_NAME, PolicyDocument=json.dumps(read_corpus)
-    )
-    return arn
-
-
 def _find_knowledge_base(agent: Any, name: str) -> Found | None:
     for page in agent.get_paginator("list_knowledge_bases").paginate():
         for summary in page["knowledgeBaseSummaries"]:
@@ -277,93 +168,12 @@ def _find_knowledge_base(agent: Any, name: str) -> Found | None:
     return None
 
 
-def _ensure_knowledge_base(
-    agent: Any, config: Config, role_arn: str, *, sleep: Sleep, clock: Clock
-) -> str:
-    found = _find_knowledge_base(agent, config.knowledge_base_name)
-    if found:
-        kb_id = found.id
-    else:
-        kb_id = agent.create_knowledge_base(
-            name=config.knowledge_base_name,
-            description="kb-demo: a fictional field-services handbook",
-            roleArn=role_arn,
-            knowledgeBaseConfiguration={
-                "type": "MANAGED",
-                "managedKnowledgeBaseConfiguration": {"embeddingModelType": "MANAGED"},
-            },
-            tags=TAGS,
-        )["knowledgeBase"]["knowledgeBaseId"]
-
-    def active() -> bool:
-        kb = agent.get_knowledge_base(knowledgeBaseId=kb_id)["knowledgeBase"]
-        return _settled(
-            kb["status"],
-            ready="ACTIVE",
-            what="knowledge base",
-            reasons=kb.get("failureReasons", []),
-        )
-
-    wait_for(active, what="the knowledge base to be ACTIVE", timeout=600, sleep=sleep, clock=clock)
-    return kb_id
-
-
 def _find_data_source(agent: Any, kb_id: str, name: str) -> Found | None:
     for page in agent.get_paginator("list_data_sources").paginate(knowledgeBaseId=kb_id):
         for summary in page["dataSourceSummaries"]:
             if summary["name"] == name:
                 return Found(summary["dataSourceId"], summary["status"])
     return None
-
-
-def _ensure_data_source(
-    agent: Any,
-    config: Config,
-    kb_id: str,
-    account_id: str,
-    bucket: str,
-    *,
-    sleep: Sleep,
-    clock: Clock,
-) -> str:
-    found = _find_data_source(agent, kb_id, config.data_source_name)
-    if found:
-        ds_id = found.id
-    else:
-        ds_id = agent.create_data_source(
-            knowledgeBaseId=kb_id,
-            name=config.data_source_name,
-            description="kb-demo corpus bucket",
-            dataDeletionPolicy="DELETE",
-            dataSourceConfiguration={
-                "type": "MANAGED_KNOWLEDGE_BASE_CONNECTOR",
-                "managedKnowledgeBaseConnectorConfiguration": {
-                    "connectorParameters": {
-                        "type": "S3",
-                        "version": "1",
-                        "connectionConfiguration": {
-                            "bucketName": bucket,
-                            "bucketOwnerAccountId": account_id,
-                        },
-                        "deletionProtectionConfiguration": {"enableDeletionProtection": False},
-                    }
-                },
-            },
-        )["dataSource"]["dataSourceId"]
-
-    def available() -> bool:
-        ds = agent.get_data_source(knowledgeBaseId=kb_id, dataSourceId=ds_id)["dataSource"]
-        return _settled(
-            ds["status"],
-            ready="AVAILABLE",
-            what="data source",
-            reasons=ds.get("failureReasons", []),
-        )
-
-    wait_for(
-        available, what="the data source to be AVAILABLE", timeout=600, sleep=sleep, clock=clock
-    )
-    return ds_id
 
 
 def _ingest(agent: Any, kb_id: str, ds_id: str, *, sleep: Sleep, clock: Clock) -> Mapping[str, int]:

@@ -2,7 +2,8 @@
 
 Ask a question on a local web page and get an answer drawn from a small staff handbook. Each claim
 in the answer cites a numbered passage, and the passages behind it are listed underneath with
-their retrieval scores. One command creates the AWS resources and another removes them.
+their retrieval scores. `cdk deploy` creates the AWS resources, `kb-demo ingest` loads the
+handbook, and `cdk destroy` removes it all.
 
 The handbook is fictional. It belongs to Acme Field Services, an invented company, and its policies
 are full of invented specifics: a hotel limit of A$255 a night in Perth, four hours to log a near
@@ -21,7 +22,7 @@ where a Kendra GenAI index is billed by the hour.
 ## How it works
 
 ```
-corpus/*.md ──(kb-demo setup)──> S3 bucket ──> managed data source ──ingest──> managed index
+corpus/*.md ──(kb-demo ingest)──> S3 bucket ──> managed data source ──ingest──> managed index
                                                                                    │
 browser ──> FastAPI on 127.0.0.1:8000 ── Retrieve ──> top 5 passages (file, score, text)
                                      └── Converse ──> answer citing [1]..[n]
@@ -30,13 +31,14 @@ optionally, with KB_DEMO_API_URL set:
 browser ──> FastAPI on 127.0.0.1 ──SigV4──> HTTP API (IAM auth) ──> Lambda ──> Retrieve, Converse
 ```
 
-- **Setup** creates, or finds by name, an S3 bucket for the corpus, an IAM role the knowledge base
-  uses to read it, a knowledge base of type `MANAGED` with managed embeddings, and a data source
-  using the managed S3 connector. It uploads `corpus/`, deletes objects no longer there, and runs
-  an ingestion job. Everything that takes tags is tagged `Project=kb-demo`, and rerunning setup is
-  safe.
+- **One CDK stack** (`infra/app.py`) holds everything: an S3 bucket for the corpus, an IAM role the
+  knowledge base uses to read it, a knowledge base of type `MANAGED` with managed embeddings, a
+  data source using the managed S3 connector, and the API below. Everything that takes tags is
+  tagged `Project=kb-demo`.
+- **Ingest** uploads `corpus/` to the stack's bucket, deletes objects no longer there, and runs an
+  ingestion job. Rerunning it is safe.
 - **Ingestion is checked, not trusted.** A job can report COMPLETE having indexed nothing, and its
-  new-document count reads 0 whenever an unchanged corpus is re-synced. So setup lists the
+  new-document count reads 0 whenever an unchanged corpus is re-synced. So ingest lists the
   documents in the knowledge base afterwards, and fails unless every corpus file is INDEXED, the
   job scanned as many documents as there are files, and none failed.
 - **Two calls, not RetrieveAndGenerate.** The page calls Retrieve for the top five passages, then
@@ -46,7 +48,7 @@ browser ──> FastAPI on 127.0.0.1 ──SigV4──> HTTP API (IAM auth) ─�
   prompt in our hands is the point of the second call.
 - **Search still works without the model.** If Converse fails (no model access, throttling, a bad
   model ID), the page shows the passages with a notice saying why there is no answer.
-- **The same search, deployed.** A CDK stack puts the search behind `POST /ask` on an API Gateway
+- **The same search, deployed.** The stack puts the search behind `POST /ask` on an API Gateway
   HTTP API. The route requires IAM authorisation, so every call must be SigV4-signed by an identity
   allowed to invoke it, and the stage is throttled to 2 requests a second (burst 5). The Lambda's
   role can call Retrieve on this one knowledge base and InvokeModel on this one model's inference
@@ -57,17 +59,17 @@ browser ──> FastAPI on 127.0.0.1 ──SigV4──> HTTP API (IAM auth) ─�
 
 ## Run it
 
-You need Python 3.12, [uv](https://docs.astral.sh/uv/), AWS CLI v2, and an AWS account in a region
-that has Bedrock Managed Knowledge Base (this one uses `ap-southeast-2`) with access to the
-generation model.
+You need Python 3.12, [uv](https://docs.astral.sh/uv/), AWS CLI v2, Node.js for the CDK CLI, and
+an AWS account in a region that has Bedrock Managed Knowledge Base (this one uses `ap-southeast-2`),
+with access to the generation model and CDK bootstrapped.
 
 ```bash
 aws login --profile triage   # short-lived credentials; no access keys anywhere
 uv sync
-uv run kb-demo setup         # create or update the resources and ingest the corpus
+bunx aws-cdk@2.1146.1 deploy --profile triage   # create or update the stack (npx works too)
+uv run kb-demo ingest        # upload the corpus, ingest it, check every file is INDEXED
 uv run kb-demo serve         # then open http://127.0.0.1:8000
 uv run kb-demo status        # what exists, the last ingestion, the model in use
-uv run kb-demo teardown      # delete everything setup made
 ```
 
 boto3 reads `aws login` credentials only with its CRT extra, which is why the dependency is
@@ -82,13 +84,9 @@ boto3 reads `aws login` credentials only with its CRT extra, which is why the de
 The default model is Claude Haiku 4.5 because Haiku 5.5's quota on the account this was built on is
 still 0. Once it isn't, set `KB_DEMO_MODEL_ID=au.anthropic.claude-haiku-5-5`.
 
-### Deploy the API
-
-This also needs Node.js for the CDK CLI, and a CDK-bootstrapped account and Region. The knowledge
-base still comes from `kb-demo setup`, so pass its ID (from `kb-demo status`) as context:
+To have the page ask the deployed API instead of Bedrock, pass the stack's `ApiUrl` output:
 
 ```bash
-bunx aws-cdk@2.1146.1 deploy -c knowledge_base_id=<id> --profile triage   # npx works too
 KB_DEMO_API_URL=<ApiUrl output> uv run kb-demo serve
 ```
 
@@ -97,7 +95,8 @@ gets the boto3 and botocore versions `uv.lock` pins, in a layer that `uv` builds
 
 ## Measured results
 
-Measured on 28 October 2026 against the real account, with Haiku 4.5:
+Measured on 28 October 2026 against the real account, with Haiku 4.5, using the boto3 `setup` and
+`teardown` commands that the CDK stack has since replaced:
 
 - **First setup:** 2 min 32 s. The job scanned 8 documents, indexed 8 as new, and failed none;
   all 8 files were INDEXED.
@@ -133,6 +132,19 @@ Measured on 28 October 2026 against the real account, with Haiku 4.5:
     | Cold (first after deploy) | 758 ms init + 1,865 ms | 3.24 s |
     | Warm, 8 calls | median 962 ms (902 ms to 4,415 ms) | median 1.31 s (1.25 s to 4.77 s) |
 
+- **The whole stack in CDK,** measured on 30 October 2026, after the boto3-made resources were torn
+  down so CloudFormation could take their names:
+  - `cdk deploy` from scratch took 99.3 s, 85.0 s of it CloudFormation. `kb-demo ingest` then took
+    128 s: scanned 8, new 8, failed 0, and all 8 files INDEXED.
+  - `cdk destroy` took 12 min 8 s, most of it deleting the data source. Afterwards nothing tagged
+    `Project=kb-demo` remained, and no `kb-demo` knowledge base, bucket or IAM role.
+  - One log group did remain: the one CDK's bucket auto-delete handler had made for itself, which
+    CloudFormation didn't own. The stack now gives that handler a log group of its own, so
+    `cdk destroy` deletes it. The redeploy showed the handler writing there; a second destroy
+    hasn't been run to confirm it.
+  - After the rebuild, an unsigned call got 403, each sample question cited its expected file, and
+    the off-corpus question was declined.
+
 ## Cost
 
 The managed knowledge base's list prices as of 28 October 2026
@@ -147,9 +159,10 @@ Converse is billed per token at the model's price, and S3 storage for a corpus t
 negligible.
 
 **Measured cost: not yet measured.** `Project` was activated as a cost allocation tag on
-30 October 2026, with a backfill requested from 1 October so usage since setup counts too. Once the
-backfill finishes, the figure comes from Cost Explorer filtered by `Project = kb-demo`. Model costs
-are tagged through an application inference profile
+30 October 2026, and a backfill from 1 October (so usage since the first setup counts) finished the
+same day. Cost Explorer still showed no line item carrying the tag that day; once one does, the
+figure comes from Cost Explorer filtered by `Project = kb-demo`. Model costs are tagged through an
+application inference profile
 ([inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles.html)),
 and this demo calls the system-defined cross-Region profile directly, so Converse costs appear
 under Bedrock model usage rather than under the tag.
@@ -157,17 +170,13 @@ under Bedrock model usage rather than under the tag.
 ## Tear it down
 
 ```bash
-bunx aws-cdk@2.1146.1 destroy -c knowledge_base_id=<id> --profile triage   # if the API is deployed
-uv run kb-demo teardown
+bunx aws-cdk@2.1146.1 destroy --profile triage --force
+uv run kb-demo status        # every resource should read "not found"
 ```
 
-`cdk destroy` leaves the account's CDK bootstrap stack (`CDKToolkit`) in place.
-
-Teardown deletes the data source, waits for it to go, deletes the knowledge base and waits again,
-then empties and deletes the bucket and deletes the role. Expect it to take around 12 minutes,
-most of it waiting for the data source. It finishes by printing the status, where
-every resource should read "not found", and exits with 1 if anything remains. It also copes with an
-account that a failed setup left half-built.
+CloudFormation deletes the API, the data source, the knowledge base, the role and the bucket,
+which the auto-delete handler empties first. Expect it to take around 12 minutes, most of it
+waiting for the data source. It leaves the account's CDK bootstrap stack (`CDKToolkit`) in place.
 
 ## Tests
 
@@ -179,9 +188,10 @@ uv run pytest
 The tests make no AWS calls. In-memory fakes stand in for S3, IAM, `bedrock-agent`,
 `bedrock-agent-runtime` and `bedrock-runtime`, and they check every call's parameters against
 botocore's service models, so a misspelt or misplaced parameter fails in a test the way it would
-against AWS. Setup, teardown and status are tested end to end over the fakes, as are the search
-and the web page. The Lambda handler is tested on HTTP API events, and the signing client is tested
-against a fake API that checks its SigV4 headers and runs the real handler.
+against AWS. Ingest and status are tested over fakes set up the way `cdk deploy` leaves the
+account, as are the search and the web page. The Lambda handler is tested on HTTP API events, and
+the signing client is tested against a fake API that checks its SigV4 headers and runs the real
+handler.
 
 ## What this doesn't show
 
@@ -195,22 +205,19 @@ against a fake API that checks its SigV4 headers and runs the real handler.
 - **Evaluation.** Three sample questions and one off-corpus question, checked by script. There is
   no evaluation set or scoring.
 - **Conversation.** Each question stands alone, with no follow-ups and no streaming.
-- **Infrastructure as code, for the knowledge base.** The API is CDK. The bucket, role, knowledge
-  base and data source are still boto3 setup and teardown, because no CloudFormation or CDK
-  resource for managed knowledge bases was found.
 
 ## Layout
 
 ```
 corpus/                     the fictional handbook, one Markdown file per policy
 src/kb_demo/config.py       region, profile, resource names, model
-src/kb_demo/resources.py    setup, status and teardown
+src/kb_demo/resources.py    ingest and status
 src/kb_demo/search.py       Retrieve, then Converse; passages, answers, citations
 src/kb_demo/web.py          the FastAPI app; templates/index.html is the page
 src/kb_demo/samples.py      the three sample questions and the fact each depends on
 src/kb_demo/cli.py          the kb-demo command
 src/kb_demo/handler.py      the Lambda handler behind POST /ask
 src/kb_demo/remote.py       the SigV4-signing client the page uses when KB_DEMO_API_URL is set
-infra/app.py, cdk.json      the CDK app: HTTP API, Lambda, its role, SDK layer and log group
+infra/app.py, cdk.json      the CDK app: bucket, knowledge base and data source, and the API
 tests/                      unit tests over in-memory AWS fakes
 ```
