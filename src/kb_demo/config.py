@@ -13,7 +13,7 @@ TAGS = {"Project": "kb-demo"}
 @dataclass(frozen=True)
 class Config:
     region: str = "ap-southeast-2"
-    profile: str = "triage"
+    profile: str | None = "triage"  # None: the default credential chain, as in CI
     # Haiku 5.5's quota is 0 on this account (Support case 179221087300959); switch when it lands.
     model_id: str = "au.anthropic.claude-haiku-4-5-20251001-v1:0"
     corpus_dir: Path = REPO_ROOT / "corpus"
@@ -29,7 +29,7 @@ class Config:
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Self:
         defaults = cls()
         return cls(
-            profile=env.get("KB_DEMO_PROFILE", defaults.profile),
+            profile=env.get("KB_DEMO_PROFILE", defaults.profile) or None,
             model_id=env.get("KB_DEMO_MODEL_ID", defaults.model_id),
             api_url=env.get("KB_DEMO_API_URL") or None,
         )

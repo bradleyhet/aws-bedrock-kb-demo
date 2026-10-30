@@ -66,10 +66,11 @@ with access to the generation model and CDK bootstrapped.
 ```bash
 aws login --profile triage   # short-lived credentials; no access keys anywhere
 uv sync
-bunx aws-cdk@2.1146.1 deploy --profile triage   # create or update the stack (npx works too)
+bunx aws-cdk@2.1146.1 deploy kb-demo --profile triage   # create or update it (npx works too)
 uv run kb-demo ingest        # upload the corpus, ingest it, check every file is INDEXED
 uv run kb-demo serve         # then open http://127.0.0.1:8000
 uv run kb-demo status        # what exists, the last ingestion, the model in use
+uv run kb-demo eval          # the release gate: sample questions and an off-corpus one
 ```
 
 boto3 reads `aws login` credentials only with its CRT extra, which is why the dependency is
@@ -92,6 +93,34 @@ KB_DEMO_API_URL=<ApiUrl output> uv run kb-demo serve
 
 The python3.12 Lambda runtime's own boto3 is too old for managed knowledge bases, so the function
 gets the boto3 and botocore versions `uv.lock` pins, in a layer that `uv` builds at synth time.
+
+## Release pipeline
+
+`.github/workflows/ci.yml` runs ruff, pytest and gitleaks on every push. A `v*` tag also runs the
+evaluation gate and, only if it passes, `cdk deploy kb-demo`:
+
+```
+push ──> ruff, pytest, gitleaks
+v* tag ──> the same ──> kb-demo eval (this commit's prompt, live knowledge base) ──> cdk deploy
+```
+
+- **The gate** (`kb-demo eval`) asks the three sample questions and one the handbook doesn't
+  cover, using the tagged commit's own search code and prompt against the live knowledge base. It
+  fails unless each sample answer cites its expected file and states its fact, and the off-corpus
+  question gets "The handbook doesn't cover that." So a release that breaks the prompt never
+  deploys.
+- **No AWS keys in GitHub.** The jobs sign in by OpenID Connect. A separate `kb-demo-ci` stack,
+  deployed once by hand, holds the GitHub OIDC provider and two roles. Both trust only
+  `repo:bradleyhet/aws-bedrock-kb-demo:ref:refs/tags/v*` with audience `sts.amazonaws.com`:
+  - `kb-demo-ci-evaluate` can list knowledge bases, call Retrieve on knowledge bases tagged
+    `Project=kb-demo`, and invoke the model;
+  - `kb-demo-ci-deploy` can only assume the CDK bootstrap roles, which do the deploying.
+
+  Keeping them out of the demo stack means `cdk destroy kb-demo` never locks CI out.
+
+```bash
+bunx aws-cdk@2.1146.1 deploy kb-demo-ci --profile triage   # once, before the first release
+```
 
 ## Measured results
 
@@ -170,13 +199,14 @@ under Bedrock model usage rather than under the tag.
 ## Tear it down
 
 ```bash
-bunx aws-cdk@2.1146.1 destroy --profile triage --force
+bunx aws-cdk@2.1146.1 destroy kb-demo --profile triage --force
 uv run kb-demo status        # every resource should read "not found"
 ```
 
 CloudFormation deletes the API, the data source, the knowledge base, the role and the bucket,
 which the auto-delete handler empties first. Expect it to take around 12 minutes, most of it
-waiting for the data source. It leaves the account's CDK bootstrap stack (`CDKToolkit`) in place.
+waiting for the data source. It leaves the account's CDK bootstrap stack (`CDKToolkit`) and the
+`kb-demo-ci` stack in place; `cdk destroy kb-demo-ci` removes the latter.
 
 ## Tests
 
@@ -191,7 +221,7 @@ botocore's service models, so a misspelt or misplaced parameter fails in a test 
 against AWS. Ingest and status are tested over fakes set up the way `cdk deploy` leaves the
 account, as are the search and the web page. The Lambda handler is tested on HTTP API events, and
 the signing client is tested against a fake API that checks its SigV4 headers and runs the real
-handler.
+handler. The evaluation gate is tested on scripted answers, one for each way an answer can fail.
 
 ## What this doesn't show
 
@@ -214,10 +244,12 @@ src/kb_demo/config.py       region, profile, resource names, model
 src/kb_demo/resources.py    ingest and status
 src/kb_demo/search.py       Retrieve, then Converse; passages, answers, citations
 src/kb_demo/web.py          the FastAPI app; templates/index.html is the page
-src/kb_demo/samples.py      the three sample questions and the fact each depends on
+src/kb_demo/samples.py      the sample questions, the fact each depends on, the off-corpus one
+src/kb_demo/evaluate.py     the release gate behind kb-demo eval
 src/kb_demo/cli.py          the kb-demo command
 src/kb_demo/handler.py      the Lambda handler behind POST /ask
 src/kb_demo/remote.py       the SigV4-signing client the page uses when KB_DEMO_API_URL is set
-infra/app.py, cdk.json      the CDK app: bucket, knowledge base and data source, and the API
+infra/app.py, cdk.json      the CDK app: the kb-demo stack, and kb-demo-ci for GitHub's OIDC roles
+.github/workflows/ci.yml    checks on every push; gate, then deploy, on a v* tag
 tests/                      unit tests over in-memory AWS fakes
 ```

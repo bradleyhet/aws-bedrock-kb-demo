@@ -1,4 +1,4 @@
-"""kb-demo: load the corpus into the deployed stack, serve the page, and inspect the stack."""
+"""kb-demo: load the corpus into the deployed stack, serve the page, inspect and evaluate it."""
 
 import argparse
 import logging
@@ -9,8 +9,9 @@ import boto3
 import uvicorn
 
 from kb_demo.config import Config
+from kb_demo.evaluate import evaluate
 from kb_demo.remote import ApiSearcher
-from kb_demo.resources import Clients, IngestError, Status, ingest, status
+from kb_demo.resources import Clients, IngestError, Status, find_knowledge_base, ingest, status
 from kb_demo.search import Answerer, Searcher
 from kb_demo.web import create_app
 
@@ -63,7 +64,7 @@ def print_status(found: Status, config: Config) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kb-demo", description=__doc__)
-    parser.add_argument("command", choices=["ingest", "serve", "status"])
+    parser.add_argument("command", choices=["ingest", "serve", "status", "eval"])
     parser.add_argument("--port", type=int, default=8000, help="port for serve (default 8000)")
     args = parser.parse_args(argv)
     command = args.command
@@ -100,8 +101,22 @@ def main(argv: list[str] | None = None) -> int:
         uvicorn.run(create_app(searcher), host="127.0.0.1", port=args.port)
         return 0
 
-    print_status(status(clients, config), config)
-    return 0
+    if command == "status":
+        print_status(status(clients, config), config)
+        return 0
+
+    # eval: the release gate, run by CI on a v* tag before it deploys.
+    kb = find_knowledge_base(clients.agent, config.knowledge_base_name)
+    if not (kb and kb.status == "ACTIVE"):
+        print("No ACTIVE knowledge base named kb-demo to evaluate against.", file=sys.stderr)
+        return 1
+    checks = evaluate(make_searcher(config, kb.id))
+    for check in checks:
+        print(f"{'PASS' if check.passed else 'FAIL'}  {check.question}")
+        print(f"      {check.detail}")
+    passed = sum(check.passed for check in checks)
+    print(f"{passed} of {len(checks)} checks passed against knowledge base {kb.id}")
+    return 0 if passed == len(checks) else 1
 
 
 if __name__ == "__main__":

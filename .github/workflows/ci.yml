@@ -1,0 +1,78 @@
+# Every push: ruff, pytest and gitleaks. A v* tag also runs the evaluation gate against the live
+# knowledge base and, only if it passes, deploys the kb-demo stack. AWS access is by OIDC into the
+# roles the kb-demo-ci stack makes, which trust this repo's v* tags only; GitHub holds no AWS keys.
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  KB_DEMO_PROFILE: ""  # no named profile: credentials come from OIDC through the environment
+  AWS_ACCOUNT: "***"
+  AWS_REGION: ap-southeast-2
+
+jobs:
+  checks:
+    name: ruff, pytest, gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0  # gitleaks scans the whole history
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      - run: uv sync --locked
+      - run: uv run ruff check
+      - run: uv run pytest
+      - name: gitleaks
+        env:
+          VERSION: 8.30.1
+        run: |
+          base="https://github.com/gitleaks/gitleaks/releases/download/v$VERSION"
+          archive="gitleaks_${VERSION}_linux_x64.tar.gz"
+          curl -sSfLO "$base/$archive"
+          curl -sSfL "$base/gitleaks_${VERSION}_checksums.txt" | grep " $archive\$" | sha256sum --check
+          tar -xzf "$archive" gitleaks
+          ./gitleaks git --redact --no-banner
+
+  evaluate:
+    name: evaluation gate
+    needs: checks
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT }}:role/kb-demo-ci-evaluate
+          aws-region: ${{ env.AWS_REGION }}
+      # This commit's own Searcher and prompt, against the live knowledge base.
+      - run: uv run kb-demo eval
+
+  deploy:
+    name: cdk deploy
+    needs: evaluate
+    runs-on: ubuntu-latest
+    concurrency: deploy
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: 24
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT }}:role/kb-demo-ci-deploy
+          aws-region: ${{ env.AWS_REGION }}
+      - run: npx --yes aws-cdk@2.1146.1 deploy kb-demo --require-approval never

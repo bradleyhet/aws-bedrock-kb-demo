@@ -29,9 +29,20 @@ from kb_demo.config import REPO_ROOT, TAGS, Config
 # through a profile needs InvokeModel on the profile and on the model in each of them.
 PROFILE_REGIONS = ("ap-southeast-2", "ap-southeast-4")
 FUNCTION_NAME = "kb-demo-ask"
+GITHUB_REPO = "bradleyhet/aws-bedrock-kb-demo"
 # The python3.12 runtime's own boto3 (1.42.97 on 2026-10-30) predates managed knowledge bases,
 # so the function gets the SDK uv.lock pins, the one the tests' fakes validate against.
 SDK = [f"{package}=={version(package)}" for package in ("boto3", "botocore")]
+
+
+def invoke_model(stack: cdk.Stack, config: Config) -> iam.PolicyStatement:
+    """Converse through the inference profile: the profile, and the model in each of its Regions."""
+    profile = stack.format_arn(
+        service="bedrock", resource="inference-profile", resource_name=config.model_id
+    )
+    model = config.model_id.split(".", 1)[1]  # the profile ID without its geography prefix
+    models = [f"arn:aws:bedrock:{region}::foundation-model/{model}" for region in PROFILE_REGIONS]
+    return iam.PolicyStatement(actions=["bedrock:InvokeModel"], resources=[profile, *models])
 
 
 @jsii.implements(cdk.ILocalBundling)
@@ -143,7 +154,6 @@ class DemoStack(cdk.Stack):
 
     def api(self, config: Config, knowledge_base: bedrock.CfnKnowledgeBase) -> None:
         """POST /ask: IAM-authorised and throttled, answered by a Lambda wrapping the Searcher."""
-        model = config.model_id.split(".", 1)[1]  # the profile ID without its geography prefix
 
         log_group = logs.LogGroup(
             self,
@@ -160,20 +170,12 @@ class DemoStack(cdk.Stack):
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
         )
         log_group.grant_write(role)
-        profile = self.format_arn(
-            service="bedrock", resource="inference-profile", resource_name=config.model_id
-        )
-        models = [
-            f"arn:aws:bedrock:{region}::foundation-model/{model}" for region in PROFILE_REGIONS
-        ]
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=["bedrock:Retrieve"], resources=[knowledge_base.attr_knowledge_base_arn]
             )
         )
-        role.add_to_policy(
-            iam.PolicyStatement(actions=["bedrock:InvokeModel"], resources=[profile, *models])
-        )
+        role.add_to_policy(invoke_model(self, config))
 
         sdk = lambda_.LayerVersion(
             self,
@@ -236,11 +238,76 @@ class DemoStack(cdk.Stack):
         cdk.CfnOutput(self, "FunctionName", value=function.function_name)
 
 
+class CiStack(cdk.Stack):
+    """GitHub Actions' way in: an OIDC provider and two roles, for this repo's v* tags only.
+
+    Deployed by hand, once, and kept apart from the demo stack, so cdk destroy of the demo never
+    locks CI out. No AWS keys are stored in GitHub.
+    """
+
+    def __init__(self, scope: Construct, config: Config, **kwargs: object) -> None:
+        super().__init__(scope, "kb-demo-ci", **kwargs)
+        issuer = "token.actions.githubusercontent.com"
+        provider = iam.OidcProviderNative(
+            self, "GitHub", url=f"https://{issuer}", client_ids=["sts.amazonaws.com"]
+        )
+        conditions = {
+            "StringEquals": {f"{issuer}:aud": "sts.amazonaws.com"},
+            "StringLike": {f"{issuer}:sub": f"repo:{GITHUB_REPO}:ref:refs/tags/v*"},
+        }
+
+        def github() -> iam.WebIdentityPrincipal:
+            return iam.WebIdentityPrincipal(provider.oidc_provider_arn, conditions)
+
+        # The release gate asks the live knowledge base the sample questions with the new code.
+        evaluate = iam.Role(
+            self,
+            "Evaluate",
+            role_name="kb-demo-ci-evaluate",
+            description="GitHub Actions release gate: ask the kb-demo knowledge base",
+            assumed_by=github(),
+        )
+        evaluate.add_to_policy(
+            iam.PolicyStatement(actions=["bedrock:ListKnowledgeBases"], resources=["*"])
+        )
+        # The knowledge base's ID changes with every rebuild, so match it by its tag instead.
+        knowledge_bases = self.format_arn(
+            service="bedrock", resource="knowledge-base", resource_name="*"
+        )
+        tagged = {f"aws:ResourceTag/{key}": value for key, value in TAGS.items()}
+        evaluate.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:Retrieve"],
+                resources=[knowledge_bases],
+                conditions={"StringEquals": tagged},
+            )
+        )
+        evaluate.add_to_policy(invoke_model(self, config))
+
+        # Deploying goes through the CDK bootstrap roles, which do the actual work.
+        deploy = iam.Role(
+            self,
+            "Deploy",
+            role_name="kb-demo-ci-deploy",
+            description="GitHub Actions deploy: may only assume the CDK bootstrap roles",
+            assumed_by=github(),
+        )
+        qualifier = cdk.DefaultStackSynthesizer.DEFAULT_QUALIFIER
+        bootstrap = self.format_arn(
+            service="iam",
+            region="",
+            resource="role",
+            resource_name=f"cdk-{qualifier}-*-{self.account}-{self.region}",
+        )
+        deploy.add_to_policy(iam.PolicyStatement(actions=["sts:AssumeRole"], resources=[bootstrap]))
+
+
 def main() -> None:
     app = cdk.App()
     config = Config.from_env()
     env = cdk.Environment(account=os.environ.get("CDK_DEFAULT_ACCOUNT"), region=config.region)
     DemoStack(app, config, env=env)
+    CiStack(app, config, env=env)
     for key, value in TAGS.items():
         cdk.Tags.of(app).add(key, value)
     app.synth()

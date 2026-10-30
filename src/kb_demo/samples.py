@@ -10,6 +10,9 @@ class Sample:
     fact: str  # text the answer depends on, found in that file and no other
 
 
+# Nothing in the handbook covers this, so the answer must be the decline.
+OFF_CORPUS = "How many weeks of parental leave do I get?"
+
 SAMPLES = (
     Sample(
         question="What's the most I can spend on a hotel night in Perth?",

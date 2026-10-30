@@ -104,7 +104,7 @@ def ingest(
 def status(clients: Clients, config: Config) -> Status:
     account_id = clients.sts.get_caller_identity()["Account"]
     bucket = config.bucket_name(account_id)
-    kb = _find_knowledge_base(clients.agent, config.knowledge_base_name)
+    kb = find_knowledge_base(clients.agent, config.knowledge_base_name)
     ds = _find_data_source(clients.agent, kb.id, config.data_source_name) if kb else None
     return Status(
         bucket=bucket if _bucket_exists(clients.s3, bucket) else None,
@@ -160,7 +160,7 @@ def _role_arn(iam: Any, role_name: str) -> str | None:
         raise
 
 
-def _find_knowledge_base(agent: Any, name: str) -> Found | None:
+def find_knowledge_base(agent: Any, name: str) -> Found | None:
     for page in agent.get_paginator("list_knowledge_bases").paginate():
         for summary in page["knowledgeBaseSummaries"]:
             if summary["name"] == name:
