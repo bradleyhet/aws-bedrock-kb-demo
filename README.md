@@ -111,7 +111,9 @@ v* tag ──> the same ──> kb-demo eval (this commit's prompt, live knowled
   deploys.
 - **No AWS keys in GitHub.** The jobs sign in by OpenID Connect. A separate `kb-demo-ci` stack,
   deployed once by hand, holds the GitHub OIDC provider and two roles. Both trust only
-  `repo:bradleyhet/aws-bedrock-kb-demo:ref:refs/tags/v*` with audience `sts.amazonaws.com`:
+  `repo:bradleyhet@36786625/aws-bedrock-kb-demo@1439180417:ref:refs/tags/v*` with audience
+  `sts.amazonaws.com`. The repo has GitHub's immutable subject claims on, so the subject names
+  the owner and repo by ID as well as by name, and a renamed or re-created repo can't match:
   - `kb-demo-ci-evaluate` can list knowledge bases, call Retrieve on knowledge bases tagged
     `Project=kb-demo`, and invoke the model;
   - `kb-demo-ci-deploy` can only assume the CDK bootstrap roles, which do the deploying.
@@ -173,6 +175,23 @@ Measured on 28 October 2026 against the real account, with Haiku 4.5, using the 
     hasn't been run to confirm it.
   - After the rebuild, an unsigned call got 403, each sample question cited its expected file, and
     the off-corpus question was declined.
+
+- **The release pipeline,** measured on 30 October 2026:
+  - The first release, `v0.2.0` ([run 41004030603](https://github.com/bradleyhet/aws-bedrock-kb-demo/actions/runs/41004030603)), failed its first attempt at the
+    gate's sign-in. GitHub's tokens for this repo carry the immutable subject, with the owner and
+    repo IDs, but the roles trusted only the name form, so STS denied AssumeRoleWithWebIdentity
+    and the deploy was skipped. With the trust condition corrected and `kb-demo-ci` redeployed
+    (41.5 s), the second attempt passed. The gate passed all 4 checks in an 18 s job, and
+    `cdk deploy kb-demo` from GitHub took a 64 s job (synthesis 11.3 s, deployment 19.4 s), which
+    updated the function's code.
+  - After the release, an unsigned call got 403, each sample question cited its expected file, and
+    the off-corpus question was declined. Round trip: cold 2.48 s; 8 warm calls median 1.26 s
+    (1.20 s to 1.87 s).
+  - The drill, `v0.2.0-drill.1` ([run 41005733006](https://github.com/bradleyhet/aws-bedrock-kb-demo/actions/runs/41005733006)), tagged a commit whose prompt says
+    "Answer in plain sentences, without passage numbers or square brackets." ruff, pytest and
+    gitleaks passed. The gate failed with 1 of 4 checks passed: each sample answer cited nothing,
+    and only the off-corpus question, still declined, passed. The deploy job was skipped, and the
+    function kept the code the release had deployed.
 
 ## Cost
 

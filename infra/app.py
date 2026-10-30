@@ -29,7 +29,9 @@ from kb_demo.config import REPO_ROOT, TAGS, Config
 # through a profile needs InvokeModel on the profile and on the model in each of them.
 PROFILE_REGIONS = ("ap-southeast-2", "ap-southeast-4")
 FUNCTION_NAME = "kb-demo-ask"
-GITHUB_REPO = "bradleyhet/aws-bedrock-kb-demo"
+# The repo has GitHub's immutable subject claims on (actions/oidc/customization/sub), so its
+# tokens name it by owner and repo ID as well: a renamed or re-created repo can't match.
+GITHUB_SUBJECT = "repo:bradleyhet@36786625/aws-bedrock-kb-demo@1439180417"
 # The python3.12 runtime's own boto3 (1.42.97 on 2026-10-30) predates managed knowledge bases,
 # so the function gets the SDK uv.lock pins, the one the tests' fakes validate against.
 SDK = [f"{package}=={version(package)}" for package in ("boto3", "botocore")]
@@ -253,7 +255,7 @@ class CiStack(cdk.Stack):
         )
         conditions = {
             "StringEquals": {f"{issuer}:aud": "sts.amazonaws.com"},
-            "StringLike": {f"{issuer}:sub": f"repo:{GITHUB_REPO}:ref:refs/tags/v*"},
+            "StringLike": {f"{issuer}:sub": f"{GITHUB_SUBJECT}:ref:refs/tags/v*"},
         }
 
         def github() -> iam.WebIdentityPrincipal:
