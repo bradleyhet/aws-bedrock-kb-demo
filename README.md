@@ -136,6 +136,7 @@ v* tag ──> the same ──> kb-demo eval (this commit's prompt, live knowled
 
 ```bash
 bunx aws-cdk@2.1146.1 deploy kb-demo-ci --profile triage   # once, before the first release
+gh secret set AWS_ACCOUNT --body <account ID>   # a secret, not a variable, so the logs mask it
 ```
 
 ## Measured results
@@ -220,12 +221,12 @@ Measured on 28 October 2026 against the real account, with Haiku 4.5, using the 
     for 1,000 and got `ValidationException`.
   - `cdk deploy` adding the workflow took 64.2 s.
   - A passing run, `uv run kb-demo ingest`: execution
-    `arn:aws:states:ap-southeast-2:***:execution:kb-demo-ingest:f20f741a-2a9f-46fc-af70-3e4fdfb9be70`
+    `execution:kb-demo-ingest:f20f741a-2a9f-46fc-af70-3e4fdfb9be70`
     SUCCEEDED in 123.8 s (8 polls, 29 states), scanned 8, modified 8, failed 0, all 8 files
     INDEXED. The command took 2 min 16 s in all, including the upload.
   - A forced failure: the same workflow started with the real corpus plus `ghost.md`, which isn't
     in the bucket. Execution
-    `arn:aws:states:ap-southeast-2:***:execution:kb-demo-ingest:forced-failure-ghost-file`
+    `execution:kb-demo-ingest:forced-failure-ghost-file`
     FAILED in 62.7 s with `CorpusNotIndexed`:
     "ingestion job VHJH2DHCDW did not index the corpus: scanned 8 of 9 corpus files; not indexed:
     ghost.md (missing)".
