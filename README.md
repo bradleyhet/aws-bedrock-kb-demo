@@ -110,8 +110,8 @@ gets the boto3 and botocore versions `uv.lock` pins, in a layer that `uv` builds
 
 ## Release pipeline
 
-`.github/workflows/ci.yml` runs ruff, pytest and gitleaks on every push. A `v*` tag also runs the
-evaluation gate and, only if it passes, `cdk deploy kb-demo`:
+`.github/workflows/release.yml` runs ruff, pytest and gitleaks on every push to master. A `v*` tag
+also runs the evaluation gate and, only if it passes, `cdk deploy kb-demo`:
 
 ```
 push ──> ruff, pytest, gitleaks
@@ -312,18 +312,18 @@ answer can fail.
 ## Layout
 
 ```
-corpus/                     the fictional handbook, one Markdown file per policy
-src/kb_demo/config.py       region, profile, resource names, model
-src/kb_demo/resources.py    ingest and status
-src/kb_demo/search.py       Retrieve, then Converse; passages, answers, citations
-src/kb_demo/web.py          the FastAPI app; templates/index.html is the page
-src/kb_demo/samples.py      the sample questions, the fact each depends on, the off-corpus one
-src/kb_demo/evaluate.py     the release gate behind kb-demo eval
-src/kb_demo/cli.py          the kb-demo command
-src/kb_demo/handler.py      the Lambda handler behind POST /ask
-src/kb_demo/remote.py       the SigV4-signing client the page uses when KB_DEMO_API_URL is set
-infra/app.py, cdk.json      the CDK app: the kb-demo stack, and kb-demo-ci for GitHub's OIDC roles
-infra/ingest_workflow.py    the ingest workflow: a JSONata state machine, SDK integrations only
-.github/workflows/ci.yml    checks on every push; gate, then deploy, on a v* tag
-tests/                      unit tests over in-memory AWS fakes
+corpus/                        the fictional handbook, one Markdown file per policy
+src/kb_demo/config.py          region, profile, resource names, model
+src/kb_demo/resources.py       ingest and status
+src/kb_demo/search.py          Retrieve, then Converse; passages, answers, citations
+src/kb_demo/web.py             the FastAPI app; templates/index.html is the page
+src/kb_demo/samples.py         the sample questions, the fact each depends on, the off-corpus one
+src/kb_demo/evaluate.py        the release gate behind kb-demo eval
+src/kb_demo/cli.py             the kb-demo command
+src/kb_demo/handler.py         the Lambda handler behind POST /ask
+src/kb_demo/remote.py          the SigV4-signing client the page uses when KB_DEMO_API_URL is set
+infra/app.py, cdk.json         the CDK app: the kb-demo stack, and kb-demo-ci for GitHub's OIDC roles
+infra/ingest_workflow.py       the ingest workflow: a JSONata state machine, SDK integrations only
+.github/workflows/release.yml  checks on every push to master; gate, then deploy, on a v* tag
+tests/                         unit tests over in-memory AWS fakes
 ```
