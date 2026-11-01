@@ -192,21 +192,23 @@ Measured on 28 October 2026 against the real account, with Haiku 4.5, using the 
     the off-corpus question was declined.
 
 - **The release pipeline,** measured on 30 October 2026:
-  - The first release, `v0.2.0` ([run 41004030603](https://github.com/bradleyhet/aws-bedrock-kb-demo/actions/runs/41004030603)), failed its first attempt at the
-    gate's sign-in. GitHub's tokens for this repo carry the immutable subject, with the owner and
-    repo IDs, but the roles trusted only the name form, so STS denied AssumeRoleWithWebIdentity
-    and the deploy was skipped. With the trust condition corrected and `kb-demo-ci` redeployed
-    (41.5 s), the second attempt passed. The gate passed all 4 checks in an 18 s job, and
-    `cdk deploy kb-demo` from GitHub took a 64 s job (synthesis 11.3 s, deployment 19.4 s), which
-    updated the function's code.
+  - The first release, `v0.2.0`, failed its first attempt at the gate's sign-in. GitHub's tokens
+    for this repo carry the immutable subject, with the owner and repo IDs, but the roles trusted
+    only the name form, so STS denied AssumeRoleWithWebIdentity and the deploy was skipped. With
+    the trust condition corrected and `kb-demo-ci` redeployed (41.5 s), the second attempt passed.
+    The gate passed all 4 checks in an 18 s job, and `cdk deploy kb-demo` from GitHub took a 64 s
+    job (synthesis 11.3 s, deployment 19.4 s), which updated the function's code.
   - After the release, an unsigned call got 403, each sample question cited its expected file, and
     the off-corpus question was declined. Round trip: cold 2.48 s; 8 warm calls median 1.26 s
     (1.20 s to 1.87 s).
-  - The drill, `v0.2.0-drill.1` ([run 41005733006](https://github.com/bradleyhet/aws-bedrock-kb-demo/actions/runs/41005733006)), tagged a commit whose prompt says
+  - The drill, `v0.2.0-drill.1`, tagged a commit whose prompt says
     "Answer in plain sentences, without passage numbers or square brackets." ruff, pytest and
     gitleaks passed. The gate failed with 1 of 4 checks passed: each sample answer cited nothing,
     and only the off-corpus question, still declined, passed. The deploy job was skipped, and the
     function kept the code the release had deployed.
+  - The Actions runs behind these figures, and behind `v0.3.0`'s below, printed the AWS account ID
+    in their logs, so they were deleted on 1 November 2026. CI now reads the ID from a repo secret,
+    which the logs mask.
 
 - **The ingest workflow,** measured on 30 October 2026:
   - Step Functions' validator recognised the three `bedrockagent` SDK actions the workflow uses
@@ -221,18 +223,18 @@ Measured on 28 October 2026 against the real account, with Haiku 4.5, using the 
     for 1,000 and got `ValidationException`.
   - `cdk deploy` adding the workflow took 64.2 s.
   - A passing run, `uv run kb-demo ingest`: execution
-    `execution:kb-demo-ingest:f20f741a-2a9f-46fc-af70-3e4fdfb9be70`
+    `kb-demo-ingest:f20f741a-2a9f-46fc-af70-3e4fdfb9be70`
     SUCCEEDED in 123.8 s (8 polls, 29 states), scanned 8, modified 8, failed 0, all 8 files
     INDEXED. The command took 2 min 16 s in all, including the upload.
   - A forced failure: the same workflow started with the real corpus plus `ghost.md`, which isn't
     in the bucket. Execution
-    `execution:kb-demo-ingest:forced-failure-ghost-file`
+    `kb-demo-ingest:forced-failure-ghost-file`
     FAILED in 62.7 s with `CorpusNotIndexed`:
     "ingestion job VHJH2DHCDW did not index the corpus: scanned 8 of 9 corpus files; not indexed:
     ghost.md (missing)".
-  - Released as `v0.3.0` ([run 41011408732](https://github.com/bradleyhet/aws-bedrock-kb-demo/actions/runs/41011408732)): the gate passed 4 of 4 checks in a 19 s
-    job, and `cdk deploy` from GitHub found only CDK's metadata to update (deployment 10.2 s), so
-    the stack deployed by hand already matched the tagged commit.
+  - Released as `v0.3.0`: the gate passed 4 of 4 checks in a 19 s job, and `cdk deploy` from
+    GitHub found only CDK's metadata to update (deployment 10.2 s), so the stack deployed by hand
+    already matched the tagged commit.
 
 ## Cost
 
