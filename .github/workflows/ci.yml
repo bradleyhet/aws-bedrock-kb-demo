@@ -1,4 +1,4 @@
-# Every push: ruff, pytest and gitleaks. A v* tag also runs the evaluation gate against the live
+# Every push to master: ruff, pytest and gitleaks. A v* tag also runs the evaluation gate against the live
 # knowledge base and, only if it passes, deploys the kb-demo stack. AWS access is by OIDC into the
 # roles the kb-demo-ci stack makes, which trust this repo's v* tags only; GitHub holds no AWS keys.
 # The account ID comes from the AWS_ACCOUNT repo secret rather than a variable, so logs mask it.
