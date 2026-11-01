@@ -88,7 +88,7 @@ def ingest(
     clients: Clients, config: Config, *, sleep: Sleep = time.sleep, clock: Clock = time.monotonic
 ) -> IngestReport:
     """Upload the corpus to the stack's bucket, then run the ingest workflow over it. The workflow
-    passes only if every corpus file was indexed: a COMPLETE job alone proves nothing (lab 04.1)."""
+    passes only if every corpus file was indexed: a COMPLETE job alone proves nothing."""
     found = status(clients, config)
     kb, ds = found.knowledge_base, found.data_source
     if not (found.bucket and kb and ds and found.workflow):

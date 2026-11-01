@@ -2,8 +2,9 @@
 
 A search-and-answer demo on Amazon Bedrock Managed Knowledge Base. A local web page answers
 questions from a small fictional handbook in `corpus/`, and cites the passages it retrieved.
-`PLAN.md` holds the platform facts, architecture, resource lifecycle and build order; read it
-before starting a build step. `SESSION-HANDOFF.md` records where the last session stopped.
+Two local notes are gitignored, so they aren't in the repository: `PLAN.md` holds the platform
+facts, architecture, resource lifecycle and build order (read it before starting a build step), and
+`SESSION-HANDOFF.md` records where the last session stopped.
 
 ## Claims
 - Report only measured numbers. Ingestion statistics, retrieval scores and costs come from a real

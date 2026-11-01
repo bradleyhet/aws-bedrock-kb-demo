@@ -19,7 +19,7 @@ DOCUMENTS = """{%
 %}"""
 
 # Why the ingestion can't be trusted; an empty list means every corpus file is indexed. A job can
-# be COMPLETE having indexed nothing (lab 04.1). In JSONata any comparison with a missing value is
+# be COMPLETE having indexed nothing. In JSONata any comparison with a missing value is
 # false, so a missing count or document is tested for explicitly.
 PROBLEMS = """{% (
   $stats := $job.Statistics;

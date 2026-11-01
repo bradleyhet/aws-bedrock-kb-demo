@@ -14,7 +14,7 @@ TAGS = {"Project": "kb-demo"}
 class Config:
     region: str = "ap-southeast-2"
     profile: str | None = "triage"  # None: the default credential chain, as in CI
-    # Haiku 5.5's quota is 0 on this account (Support case 179221087300959); switch when it lands.
+    # Haiku 5.5's quota is 0 on the account this was built on; switch when it lands.
     model_id: str = "au.anthropic.claude-haiku-4-5-20251001-v1:0"
     corpus_dir: Path = REPO_ROOT / "corpus"
     knowledge_base_name: str = "kb-demo"
