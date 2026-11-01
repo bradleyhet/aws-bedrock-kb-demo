@@ -209,6 +209,14 @@ Measured on 28 October 2026 against the real account, with Haiku 4.5, using the 
   - The Actions runs behind these figures, and behind `v0.3.0`'s below, printed the AWS account ID
     in their logs, so they were deleted on 1 November 2026. CI now reads the ID from a repo secret,
     which the logs mask.
+  - The release and the drill were re-run on 1 November 2026, and neither log contains the account
+    ID; the roles appear as `arn:aws:iam::***:role/...`.
+    - `v0.3.1` ([run 41281165533](https://github.com/bradleyhet/aws-bedrock-kb-demo/actions/runs/41281165533)): the checks passed in a 10 s job, the gate passed 4 of 4
+      checks in a 19 s job, and `cdk deploy` took a 73 s job (synthesis 16.8 s, deployment
+      20.7 s), which updated only the function.
+    - The drill, `v0.3.1-drill.1` ([run 41281327232](https://github.com/bradleyhet/aws-bedrock-kb-demo/actions/runs/41281327232)), put the same prompt change on top of
+      `v0.3.1`. The checks passed; the gate failed with 1 of 4 checks passed, each sample answer
+      citing nothing, and the deploy job was skipped.
 
 - **The ingest workflow,** measured on 30 October 2026:
   - Step Functions' validator recognised the three `bedrockagent` SDK actions the workflow uses
