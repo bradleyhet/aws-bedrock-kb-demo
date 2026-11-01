@@ -2,6 +2,7 @@
 name = "kb-demo"
 version = "0.1.0"
 description = "Search-and-answer demo on Amazon Bedrock Managed Knowledge Base, over a fictional handbook"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "boto3[crt]>=1.43.120",
