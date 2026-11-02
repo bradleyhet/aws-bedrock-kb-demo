@@ -1,8 +1,9 @@
 """CDK app: the whole demo as one stack.
 
-The corpus bucket, the knowledge base and its data source, POST /ask on an HTTP API that
-requires IAM authorisation, answered by a Lambda, and the ingest workflow in Step Functions. After
-cdk deploy, `kb-demo ingest` uploads the corpus and runs the workflow over it.
+The corpus bucket, the knowledge base and its data source, an HTTP API that requires IAM
+authorisation with POST /ask answered by the Python Lambda and POST /dotnet/ask by the .NET one,
+and the ingest workflow in Step Functions. After cdk deploy, `kb-demo ingest` uploads the corpus
+and runs the workflow over it.
 """
 
 import json
@@ -16,6 +17,7 @@ import aws_cdk as cdk
 import jsii
 from aws_cdk import aws_apigatewayv2 as apigw
 from aws_cdk import aws_bedrock as bedrock
+from aws_cdk import aws_ecr_assets as ecr_assets
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
@@ -32,6 +34,8 @@ from kb_demo.config import REPO_ROOT, TAGS, Config
 # through a profile needs InvokeModel on the profile and on the model in each of them.
 PROFILE_REGIONS = ("ap-southeast-2", "ap-southeast-4")
 FUNCTION_NAME = "kb-demo-ask"
+DOTNET_FUNCTION_NAME = "kb-demo-ask-dotnet"
+DOTNET_PATH = "/dotnet"  # the .NET API's route prefix: POST /dotnet/ask
 # The repo has GitHub's immutable subject claims on (actions/oidc/customization/sub), so its
 # tokens name it by owner and repo ID as well: a renamed or re-created repo can't match.
 GITHUB_SUBJECT = "repo:bradleyhet@36786625/aws-bedrock-kb-demo@1439180417"
@@ -160,21 +164,27 @@ class DemoStack(cdk.Stack):
         cdk.CfnOutput(self, "DataSourceId", value=data_source.attr_data_source_id)
         return knowledge_base, data_source
 
-    def api(self, config: Config, knowledge_base: bedrock.CfnKnowledgeBase) -> None:
-        """POST /ask: IAM-authorised and throttled, answered by a Lambda wrapping the Searcher."""
-
+    def ask_permissions(
+        self,
+        config: Config,
+        knowledge_base: bedrock.CfnKnowledgeBase,
+        function_name: str,
+        ids: tuple[str, str],
+    ) -> tuple[iam.Role, logs.LogGroup]:
+        """A function's log group, and its role (construct IDs as given)."""
+        log_id, role_id = ids
         log_group = logs.LogGroup(
             self,
-            "Logs",
-            log_group_name=f"/aws/lambda/{FUNCTION_NAME}",
+            log_id,
+            log_group_name=f"/aws/lambda/{function_name}",
             retention=logs.RetentionDays.ONE_WEEK,
             removal_policy=cdk.RemovalPolicy.DESTROY,
         )
         # Least privilege: this knowledge base, this model, this log group, nothing else.
         role = iam.Role(
             self,
-            "Role",
-            role_name=f"{FUNCTION_NAME}-role",
+            role_id,
+            role_name=f"{function_name}-role",
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
         )
         log_group.grant_write(role)
@@ -184,6 +194,13 @@ class DemoStack(cdk.Stack):
             )
         )
         role.add_to_policy(invoke_model(self, config))
+        return role, log_group
+
+    def api(self, config: Config, knowledge_base: bedrock.CfnKnowledgeBase) -> None:
+        """POST /ask and POST /dotnet/ask: IAM-authorised and throttled, one Lambda behind each."""
+        role, log_group = self.ask_permissions(
+            config, knowledge_base, FUNCTION_NAME, ("Logs", "Role")
+        )
 
         sdk = lambda_.LayerVersion(
             self,
@@ -224,6 +241,32 @@ class DemoStack(cdk.Stack):
             },
         )
 
+        # The same service in C#: the dotnet/ image, with the Lambda Web Adapter turning each
+        # event into an HTTP request to ASP.NET Core. Built for arm64, as the Python one runs.
+        dotnet_role, dotnet_logs = self.ask_permissions(
+            config, knowledge_base, DOTNET_FUNCTION_NAME, ("DotnetLogs", "DotnetRole")
+        )
+        dotnet = lambda_.DockerImageFunction(
+            self,
+            "AskDotnet",
+            function_name=DOTNET_FUNCTION_NAME,
+            code=lambda_.DockerImageCode.from_image_asset(
+                str(REPO_ROOT / "dotnet"), platform=ecr_assets.Platform.LINUX_ARM64
+            ),
+            architecture=lambda_.Architecture.ARM_64,
+            memory_size=512,
+            timeout=cdk.Duration.seconds(29),
+            role=dotnet_role,
+            log_group=dotnet_logs,
+            environment={
+                "KB_DEMO_KNOWLEDGE_BASE_ID": knowledge_base.attr_knowledge_base_id,
+                "KB_DEMO_MODEL_ID": config.model_id,
+                # The HTTP API passes the whole path; the adapter strips the prefix, so the app
+                # serves /ask wherever it is mounted.
+                "AWS_LWA_REMOVE_BASE_PATH": DOTNET_PATH,
+            },
+        )
+
         # No reserved concurrency: the account's limit is 10, all of which must stay unreserved.
         # Stage throttling is what caps the spend instead.
         api = apigw.HttpApi(self, "Api", api_name="kb-demo", create_default_stage=False)
@@ -241,9 +284,16 @@ class DemoStack(cdk.Stack):
             integration=HttpLambdaIntegration("AskIntegration", function),
             authorizer=HttpIamAuthorizer(),
         )
+        api.add_routes(
+            path=f"{DOTNET_PATH}/ask",
+            methods=[apigw.HttpMethod.POST],
+            integration=HttpLambdaIntegration("AskDotnetIntegration", dotnet),
+            authorizer=HttpIamAuthorizer(),
+        )
 
         cdk.CfnOutput(self, "ApiUrl", value=stage.url)
         cdk.CfnOutput(self, "FunctionName", value=function.function_name)
+        cdk.CfnOutput(self, "DotnetFunctionName", value=dotnet.function_name)
 
     def ingest_workflow(
         self,

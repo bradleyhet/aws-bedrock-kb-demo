@@ -66,10 +66,15 @@ def print_status(found: Status, config: Config) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kb-demo", description=__doc__)
-    parser.add_argument("command", choices=["ingest", "serve", "status", "eval"])
+    parser.add_argument("command", choices=["ingest", "serve", "status", "eval", "env"])
     parser.add_argument("--port", type=int, default=8000, help="port for serve (default 8000)")
     parser.add_argument(
-        "--url", help="for eval: ask the POST /ask at this address over plain HTTP instead"
+        "--url", help="for eval: ask the POST /ask at this address instead of Bedrock directly"
+    )
+    parser.add_argument(
+        "--signed",
+        action="store_true",
+        help="for eval --url: sign each request with SigV4, as the deployed API requires",
     )
     args = parser.parse_args(argv)
     command = args.command
@@ -111,10 +116,26 @@ def main(argv: list[str] | None = None) -> int:
         print_status(status(clients, config), config)
         return 0
 
+    if command == "env":
+        # The settings the .NET API reads, as KEY=value lines for docker run --env-file.
+        kb = find_knowledge_base(clients.agent, config.knowledge_base_name)
+        if not (kb and kb.status == "ACTIVE"):
+            print("No ACTIVE knowledge base named kb-demo.", file=sys.stderr)
+            return 1
+        print(f"KB_DEMO_KNOWLEDGE_BASE_ID={kb.id}")
+        print(f"KB_DEMO_MODEL_ID={config.model_id}")
+        print(f"AWS_REGION={config.region}")
+        return 0
+
     # eval: the release gate, run by CI on a v* tag before it deploys.
     if args.url:
-        # The .NET container on the CI runner: nothing in front of it to sign for.
-        answerer: Answerer = ApiSearcher(args.url, None, region=config.region)
+        # Signed for the deployed API; unsigned for a container on a CI runner, which has no
+        # IAM in front of it.
+        credentials = None
+        if args.signed:
+            session = boto3.Session(profile_name=config.profile, region_name=config.region)
+            credentials = session.get_credentials()
+        answerer: Answerer = ApiSearcher(args.url, credentials, region=config.region)
         target = args.url
     else:
         kb = find_knowledge_base(clients.agent, config.knowledge_base_name)
