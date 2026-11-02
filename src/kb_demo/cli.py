@@ -122,9 +122,15 @@ def main(argv: list[str] | None = None) -> int:
         if not (kb and kb.status == "ACTIVE"):
             print("No ACTIVE knowledge base named kb-demo.", file=sys.stderr)
             return 1
-        print(f"KB_DEMO_KNOWLEDGE_BASE_ID={kb.id}")
-        print(f"KB_DEMO_MODEL_ID={config.model_id}")
-        print(f"AWS_REGION={config.region}")
+        lines = (
+            f"KB_DEMO_KNOWLEDGE_BASE_ID={kb.id}\n"
+            f"KB_DEMO_MODEL_ID={config.model_id}\n"
+            f"AWS_REGION={config.region}\n"
+        )
+        # As bytes, so Windows' text-mode stdout can't end each line with \r\n: the \r would
+        # reach the API as the last character of each value.
+        sys.stdout.buffer.write(lines.encode())
+        sys.stdout.buffer.flush()
         return 0
 
     # eval: the release gate, run by CI on a v* tag before it deploys.
