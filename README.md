@@ -10,6 +10,10 @@ behind an IAM-authorised HTTP API on Lambda, ingestion as a Step Functions workf
 until every file is indexed, the whole stack in one CDK app, and releases from GitHub Actions that
 sign in to AWS by OIDC and deploy only once an evaluation gate passes.
 
+The same search also runs in C#: an ASP.NET Core API on .NET 10, shipped to Lambda as a container
+image on its own route behind the same API. A release deploys only when both versions pass the same
+gate.
+
 The handbook is fictional. It belongs to Acme Field Services, an invented company, and its policies
 are full of invented specifics: a hotel limit of A$255 a night in Perth, four hours to log a near
 miss, an excess of A$250 on a second laptop claim. A correct answer can only have come from
@@ -35,6 +39,9 @@ browser ──> FastAPI on 127.0.0.1:8000 ── Retrieve ──> top 5 passages
 
 optionally, with KB_DEMO_API_URL set:
 browser ──> FastAPI on 127.0.0.1 ──SigV4──> HTTP API (IAM auth) ──> Lambda ──> Retrieve, Converse
+
+the C# version, on its own route:
+POST /dotnet/ask ──SigV4──> HTTP API (IAM auth) ──> Lambda image (ASP.NET) ──> Retrieve, Converse
 ```
 
 - **One CDK stack** (`infra/app.py`) holds everything: an S3 bucket for the corpus, an IAM role the
@@ -69,13 +76,25 @@ browser ──> FastAPI on 127.0.0.1 ──SigV4──> HTTP API (IAM auth) ─�
   profile and the model in the two Regions the profile routes to, and write to its own log group;
   nothing else. With `KB_DEMO_API_URL` set, `kb-demo serve` signs its calls with your profile and
   asks the API instead of Bedrock.
+- **The same search in C#.** `dotnet/` is an ASP.NET Core minimal API on .NET 10 that does what the
+  Python search does: Retrieve for the top five passages, then the same prompt through Converse,
+  by way of Microsoft.Extensions.AI's `IChatClient`, returning the same JSON. When Converse fails,
+  it too returns the passages and says why. On Lambda it runs as an arm64 container image:
+  Microsoft's chiseled ASP.NET runtime, which has no shell or package manager, with the Lambda Web
+  Adapter added as an extension. The app carries no Lambda code, so one Dockerfile builds the image
+  for local runs, for the CI gate and for Lambda. It answers `POST /dotnet/ask` on the same HTTP
+  API, under the same IAM authorisation, and its role is scoped the same way as the Python
+  function's. Lambda also has a managed `dotnet10` runtime. The container was chosen for that one
+  image, and it gives up SnapStart, which doesn't support container images; Measured results has
+  the cold starts.
 - The page has no JavaScript, and its light and dark themes follow the system setting.
 
 ## Run it
 
-You need Python 3.12, [uv](https://docs.astral.sh/uv/), AWS CLI v2, Node.js for the CDK CLI, and
-an AWS account in a region that has Bedrock Managed Knowledge Base (this one uses `ap-southeast-2`),
-with access to the generation model and CDK bootstrapped.
+You need Python 3.12, [uv](https://docs.astral.sh/uv/), AWS CLI v2, Node.js for the CDK CLI,
+Docker (`cdk deploy` builds the C# API's image), and an AWS account in a region that has Bedrock
+Managed Knowledge Base (this one uses `ap-southeast-2`), with access to the generation model and
+CDK bootstrapped. The C# API needs the .NET 10 SDK only to build, test or run it outside Docker.
 
 ```bash
 aws login --profile triage   # short-lived credentials; no access keys anywhere
@@ -105,17 +124,33 @@ To have the page ask the deployed API instead of Bedrock, pass the stack's `ApiU
 KB_DEMO_API_URL=<ApiUrl output> uv run kb-demo serve
 ```
 
+To run the C# API locally and put the release gate's questions to it:
+
+```bash
+AWS_PROFILE=triage KB_DEMO_KNOWLEDGE_BASE_ID=<from kb-demo status> \
+  KB_DEMO_MODEL_ID=au.anthropic.claude-haiku-4-5-20251001-v1:0 \
+  dotnet run --project dotnet/src/KbDemo.Api        # listens on http://localhost:8080
+uv run kb-demo eval --url http://localhost:8080      # in a second terminal
+```
+
+The AWS SDK for .NET reads `aws login` credentials only with its `AWSSDK.Signin` package, which is
+why the project references it.
+
 The python3.12 Lambda runtime's own boto3 is too old for managed knowledge bases, so the function
 gets the boto3 and botocore versions `uv.lock` pins, in a layer that `uv` builds at synth time.
 
 ## Release pipeline
 
-`.github/workflows/release.yml` runs ruff, pytest and gitleaks on every push to master. A `v*` tag
-also runs the evaluation gate and, only if it passes, `cdk deploy kb-demo`:
+`.github/workflows/release.yml` runs on every push to master and every pull request into it: ruff,
+pytest and gitleaks for the Python, and for the C# API `dotnet format`, its tests, the container
+image, a smoke test and a Trivy scan. A `v*` tag also runs two evaluation gates and, only if both
+pass, `cdk deploy kb-demo`:
 
 ```
-push ──> ruff, pytest, gitleaks
-v* tag ──> the same ──> kb-demo eval (this commit's prompt, live knowledge base) ──> cdk deploy
+push, pull request ──> ruff, pytest, gitleaks
+                   └─> dotnet format, dotnet test, image, smoke test, Trivy (arm64)
+v* tag ──> the same ──> kb-demo eval (Python, in-process, live knowledge base) ───┬──> cdk deploy
+                    └─> kb-demo eval --url (the C# image on the runner, live KB) ──┘
 ```
 
 - **The gate** (`kb-demo eval`) asks the three sample questions and one the handbook doesn't
@@ -123,11 +158,22 @@ v* tag ──> the same ──> kb-demo eval (this commit's prompt, live knowled
   fails unless each sample answer cites its expected file and states its fact, and the off-corpus
   question gets "The handbook doesn't cover that." So a release that breaks the prompt never
   deploys.
+- **The C# gate** puts the same four questions to the C# API. On an arm64 runner, the job builds
+  the tagged commit's image, runs it with the evaluate role's short-lived credentials passed in as
+  environment variables, and points `kb-demo eval --url http://localhost:8080` at it. The deploy
+  needs both gates, so a release that breaks the C# prompt doesn't deploy even when the Python gate
+  passes.
+- **The image** is built from base images pinned by digest: the .NET 10 SDK to build, the chiseled
+  ASP.NET 10.0.14 runtime to run, and the Lambda Web Adapter 1.1.0. It runs as a non-root user
+  (UID 1654). The smoke test checks that user and that `/healthz` answers, and Trivy fails the job
+  on any HIGH or CRITICAL finding that has a fix. The C# jobs and the deploy run on GitHub's arm64
+  runners, so the arm64 image builds without emulation.
 - **No AWS keys in GitHub.** The jobs sign in by OpenID Connect. A separate `kb-demo-ci` stack,
   deployed once by hand, holds the GitHub OIDC provider and two roles. Both trust only
   `repo:bradleyhet@36786625/aws-bedrock-kb-demo@1439180417:ref:refs/tags/v*` with audience
-  `sts.amazonaws.com`. The repo has GitHub's immutable subject claims on, so the subject names
-  the owner and repo by ID as well as by name, and a renamed or re-created repo can't match:
+  `sts.amazonaws.com`, so pushes to master and pull requests get no AWS access. The repo has
+  GitHub's immutable subject claims on, so the subject names the owner and repo by ID as well as
+  by name, and a renamed or re-created repo can't match:
   - `kb-demo-ci-evaluate` can list knowledge bases, call Retrieve on knowledge bases tagged
     `Project=kb-demo`, and invoke the model;
   - `kb-demo-ci-deploy` can only assume the CDK bootstrap roles, which do the deploying.
@@ -244,6 +290,46 @@ Measured on 28 October 2026 against the real account, with Haiku 4.5, using the 
     GitHub found only CDK's metadata to update (deployment 10.2 s), so the stack deployed by hand
     already matched the tagged commit.
 
+- **The C# API,** measured on 2 November 2026:
+  - `cdk deploy` adding the C# function, its role, log group and route, run from the build
+    machine, took 104.2 s in all, including building the image and pushing it to ECR; 64.3 s of
+    it was deployment. ECR holds a single-platform arm64 image of 55.6 MB.
+  - Afterwards an unsigned call to `/dotnet/ask` got 403, and signed, the gate's four questions
+    passed 4 of 4.
+  - Trivy found no fixable HIGH or CRITICAL vulnerabilities in the image's 8 OS packages or its
+    three .NET dependency manifests (the app's and the two shared frameworks'). It listed no
+    target for the Web Adapter binary.
+  - Released as `v0.4.0` ([run 41437689437](https://github.com/bradleyhet/aws-bedrock-kb-demo/actions/runs/41437689437)):
+    the Python checks passed in an 11 s job and the C# checks, 18 tests on arm64 among them, in a
+    63 s job. The Python gate passed 4 of 4 in a 27 s job and the C# gate 4 of 4 in a 39 s job.
+    `cdk deploy` took a 53 s job (synthesis 9.7 s, deployment 9.5 s) and found only CDK's metadata
+    to update: the deploy from the build machine had already published this image, so CI built
+    and pushed none.
+  - The drill, `v0.4.0-drill.1` ([run 41438210622](https://github.com/bradleyhet/aws-bedrock-kb-demo/actions/runs/41438210622)),
+    changed only the C# prompt, replacing its citation line with "Don't cite the passages or
+    mention their numbers." The C# tests still passed, and so did the Python gate, 4 of 4. The C#
+    gate failed with 1 of 4 checks passed: the three handbook questions cited nothing, and the
+    off-corpus one was still declined. The deploy job was skipped.
+  - Neither log contains the account ID.
+  - **Latency.** The account's quota for Haiku 4.5 through cross-Region inference is 10 requests a
+    minute. A first run sent 11 calls to each route back to back, C# first, in 77 s. Bedrock
+    recorded 28 throttled invocations, and the Python calls, which came second, took up to 10.9 s
+    while boto3 backed off and retried. That measured the quota, not the language, so the warm
+    figures below come from a second run that alternated the routes at one call every 7 s, with
+    no throttles recorded. The cold figures are each route's first call after more than 30
+    minutes idle, from the first run. From Lambda's REPORT lines, and round trips from the build
+    machine:
+
+    | Call | C# Lambda | C# round trip | Python Lambda | Python round trip |
+    |---|---|---|---|---|
+    | Cold | 834 ms init + 2,893 ms | 4.48 s | 661 ms init + 1,197 ms | 2.57 s |
+    | Warm, 10 calls each | median 879 ms (651 to 1,020) | median 1.22 s (0.99 to 1.44) | median 892 ms (786 to 940) | median 1.24 s (1.14 to 1.31) |
+
+    Warm, the two medians are 13 ms apart. Cold, C# was slower, 3.7 s billed against 1.9 s, and
+    most of the gap was its first request after init rather than the init itself. The C#
+    function's first call after its deploy took 1,666 ms init + 2,989 ms. Both functions have
+    512 MB; the most either used was 129 MB for C# and 89 MB for Python.
+
 ## Cost
 
 The managed knowledge base's list prices as of 28 October 2026
@@ -296,6 +382,17 @@ API events, and the signing client is tested against a fake API that checks its 
 runs the real handler. The evaluation gate is tested on scripted answers, one for each way an
 answer can fail.
 
+```bash
+cd dotnet
+dotnet format --verify-no-changes
+dotnet test
+```
+
+The 18 C# tests make no AWS calls either. Fakes stand in for the retriever and the chat client,
+and the endpoint tests run the whole app in memory through `WebApplicationFactory`: the answer's
+JSON has exactly the fields the Python gate reads, a blank question or a body that isn't JSON gets
+a 400, and the service refuses to start without a knowledge base ID.
+
 ## What this doesn't show
 
 - **Scale.** Eight files, about 13 KB. Nothing here says how retrieval quality or ingestion time
@@ -314,6 +411,16 @@ answer can fail.
   automatic rollback. The gate tests a release's code and prompt against the knowledge base already
   deployed, so a change to the stack itself deploys without being evaluated first. CI deploys only
   `kb-demo`; `kb-demo-ci` is deployed by hand.
+- **The shipped image, tested.** The C# gate tests an image built on the runner from the tagged
+  commit, and the deploy job builds its own from the same commit, so the image that ships isn't the
+  one the gate tested. That deploy-time build and its push to ECR haven't yet run in CI either:
+  `v0.4.0`'s deploy found the image already published. The first release that changes `dotnet/`
+  will run them.
+- **Cold starts.** The comparison has one cold call per route, and the C# function one more from
+  its deploy. No ReadyToRun, Native AOT or provisioned concurrency was tried, and SnapStart doesn't
+  support container images.
+- **The adapter.** Trivy checks the image's OS packages and .NET dependencies, but lists no target
+  for the Lambda Web Adapter binary, so the adapter's own dependencies go unchecked.
 - **Operations.** No alarms, dashboards or tracing. The Lambda logs to CloudWatch Logs, kept for a
   week, and Step Functions keeps each execution's history.
 
@@ -330,8 +437,11 @@ src/kb_demo/evaluate.py        the release gate behind kb-demo eval
 src/kb_demo/cli.py             the kb-demo command
 src/kb_demo/handler.py         the Lambda handler behind POST /ask
 src/kb_demo/remote.py          the SigV4-signing client the page uses when KB_DEMO_API_URL is set
+dotnet/src/KbDemo.Api/         the same search in C#: ASP.NET Core minimal API, POST /dotnet/ask
+dotnet/tests/                  its tests: xunit v3 over fakes, and the app in memory
+dotnet/Dockerfile              the Lambda image: chiseled ASP.NET runtime plus the Web Adapter
 infra/app.py, cdk.json         the CDK app: the kb-demo stack, and kb-demo-ci for GitHub's OIDC roles
 infra/ingest_workflow.py       the ingest workflow: a JSONata state machine, SDK integrations only
-.github/workflows/release.yml  checks on every push to master; gate, then deploy, on a v* tag
+.github/workflows/release.yml  checks on each push and pull request; both gates, then deploy, on v*
 tests/                         unit tests over in-memory AWS fakes
 ```
