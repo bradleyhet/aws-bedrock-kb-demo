@@ -1,7 +1,8 @@
-# Every push to master: ruff, pytest and gitleaks. A v* tag also runs the evaluation gate against
-# the live knowledge base and, only if it passes, deploys the kb-demo stack. AWS access is by OIDC
-# into the roles the kb-demo-ci stack makes, which trust this repo's v* tags only; GitHub holds no
-# AWS keys. The account ID comes from the AWS_ACCOUNT repo secret rather than a variable, so logs
+# Every push to master and every pull request into it: ruff, pytest and gitleaks, and for the .NET
+# API dotnet format, its tests, the container image and a Trivy scan of it. A v* tag also runs the
+# evaluation gate against the live knowledge base and, only if it passes, deploys the kb-demo
+# stack. AWS access is by OIDC into the roles the kb-demo-ci stack makes, which trust this repo's
+# v* tags only, so pull requests get none; GitHub holds no AWS keys. The account ID comes from the AWS_ACCOUNT repo secret rather than a variable, so logs
 # mask it. This file was ci.yml until 1 November 2026, when GitHub's record of that workflow stuck.
 name: CI
 
@@ -9,6 +10,8 @@ on:
   push:
     branches: [master]
     tags: ["v*"]
+  pull_request:
+    branches: [master]
 
 permissions:
   contents: read
@@ -39,6 +42,47 @@ jobs:
           curl -sSfL "$base/gitleaks_${VERSION}_checksums.txt" | grep " $archive\$" | sha256sum --check
           tar -xzf "$archive" gitleaks
           ./gitleaks git --redact --no-banner
+
+  dotnet:
+    name: dotnet format, tests, image, trivy
+    # arm64, like the Lambda the image will run on, so the image is built and started natively.
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        working-directory: dotnet
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
+        with:
+          global-json-file: dotnet/global.json
+      - run: dotnet restore --locked-mode
+      - run: dotnet format --verify-no-changes --no-restore
+      - run: dotnet build --no-restore --configuration Release
+      - run: dotnet test --no-build --configuration Release
+      - run: docker build --platform linux/arm64 --tag kb-demo-dotnet:ci .
+      - name: smoke test (the image runs as a non-root user and answers /healthz)
+        run: |
+          user=$(docker image inspect --format '{{.Config.User}}' kb-demo-dotnet:ci)
+          echo "image user: $user"
+          [ -n "$user" ] && [ "$user" != "0" ] && [ "$user" != "root" ]
+          # Start-up validation needs settings; /healthz itself never calls AWS.
+          docker run --detach --publish 8080:8080 \
+            --env KB_DEMO_KNOWLEDGE_BASE_ID=SMOKETEST --env KB_DEMO_MODEL_ID=smoke-test \
+            kb-demo-dotnet:ci
+          curl --silent --show-error --fail --retry 30 --retry-connrefused --retry-delay 1 \
+            http://localhost:8080/healthz
+      - name: trivy
+        env:
+          VERSION: 0.76.1
+        # Fails on HIGH or CRITICAL findings that have a fix; an unfixed one can't be acted on here.
+        run: |
+          base="https://github.com/aquasecurity/trivy/releases/download/v$VERSION"
+          archive="trivy_${VERSION}_Linux-ARM64.tar.gz"
+          curl -sSfLO "$base/$archive"
+          curl -sSfL "$base/trivy_${VERSION}_checksums.txt" | grep " $archive\$" | sha256sum --check
+          tar -xzf "$archive" trivy
+          ./trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --no-progress \
+            kb-demo-dotnet:ci
 
   evaluate:
     name: evaluation gate
