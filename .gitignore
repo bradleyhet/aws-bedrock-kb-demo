@@ -8,6 +8,13 @@ dist/
 build/
 *.egg-info/
 
+# .NET
+bin/
+obj/
+TestResults/
+.vs/
+*.user
+
 # CDK synth output
 cdk.out/
 
