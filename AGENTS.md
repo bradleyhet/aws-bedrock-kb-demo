@@ -19,6 +19,7 @@ facts, architecture, resource lifecycle and build order (read it before starting
 - Pass `region_name` explicitly to every boto3 client. The generation model comes from
   `KB_DEMO_MODEL_ID`, passed explicitly to every Converse call.
 - boto3 reads `aws login` credentials only with the CRT extra (`boto3[crt]`).
+- The AWS SDK for .NET reads `aws login` credentials only with `AWSSDK.Signin`.
 - In Git Bash, prefix AWS CLI calls with `MSYS_NO_PATHCONV=1`.
 - Tag everything that takes tags with `Project=kb-demo`. Find resources by name, so setup and
   teardown stay idempotent and treat "not found" as success.
@@ -27,6 +28,8 @@ facts, architecture, resource lifecycle and build order (read it before starting
 
 ## Code
 - Python 3.12 with uv. A change is done when `uv run ruff check` and `uv run pytest` are green.
+- C# on .NET 10 in `dotnet/`. A change there is done when `dotnet format --verify-no-changes` and
+  `dotnet test` are green.
 - Inject clients, clocks and sleeps so tests run without AWS.
 - Australian English in docs, comments, log messages and page text (organisation, prioritise,
   behaviour, licence).

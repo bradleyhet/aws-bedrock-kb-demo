@@ -68,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kb-demo", description=__doc__)
     parser.add_argument("command", choices=["ingest", "serve", "status", "eval"])
     parser.add_argument("--port", type=int, default=8000, help="port for serve (default 8000)")
+    parser.add_argument(
+        "--url", help="for eval: ask the POST /ask at this address over plain HTTP instead"
+    )
     args = parser.parse_args(argv)
     command = args.command
 
@@ -109,16 +112,23 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # eval: the release gate, run by CI on a v* tag before it deploys.
-    kb = find_knowledge_base(clients.agent, config.knowledge_base_name)
-    if not (kb and kb.status == "ACTIVE"):
-        print("No ACTIVE knowledge base named kb-demo to evaluate against.", file=sys.stderr)
-        return 1
-    checks = evaluate(make_searcher(config, kb.id))
+    if args.url:
+        # The .NET container on the CI runner: nothing in front of it to sign for.
+        answerer: Answerer = ApiSearcher(args.url, None, region=config.region)
+        target = args.url
+    else:
+        kb = find_knowledge_base(clients.agent, config.knowledge_base_name)
+        if not (kb and kb.status == "ACTIVE"):
+            print("No ACTIVE knowledge base named kb-demo to evaluate against.", file=sys.stderr)
+            return 1
+        answerer = make_searcher(config, kb.id)
+        target = f"knowledge base {kb.id}"
+    checks = evaluate(answerer)
     for check in checks:
         print(f"{'PASS' if check.passed else 'FAIL'}  {check.question}")
         print(f"      {check.detail}")
     passed = sum(check.passed for check in checks)
-    print(f"{passed} of {len(checks)} checks passed against knowledge base {kb.id}")
+    print(f"{passed} of {len(checks)} checks passed against {target}")
     return 0 if passed == len(checks) else 1
 
 

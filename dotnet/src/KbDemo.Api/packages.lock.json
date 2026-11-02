@@ -1,0 +1,70 @@
+{
+  "version": 2,
+  "dependencies": {
+    "net10.0": {
+      "AWSSDK.BedrockAgentRuntime": {
+        "type": "Direct",
+        "requested": "[4.0.105, )",
+        "resolved": "4.0.105",
+        "contentHash": "p7qgljXILuCNsQ3oH+zJoINWzjPLbo+ISB9643M+DWoKFgcPxjbnugyhN6vQSKMOVQCvPOQIpzJEtPqJHfvhwQ==",
+        "dependencies": {
+          "AWSSDK.Core": "[4.0.102.16, 5.0.0)"
+        }
+      },
+      "AWSSDK.BedrockRuntime": {
+        "type": "Direct",
+        "requested": "[4.0.101.14, )",
+        "resolved": "4.0.101.14",
+        "contentHash": "a1/c/q6p5t4Pa7ioEzAdYF2KvrLbWK4Bg/ypAOW1E0y82Qd9WhQXKo1zQXKFgkEUkO1dHt1zzlus9cRklJnSig==",
+        "dependencies": {
+          "AWSSDK.Core": "[4.0.102.14, 5.0.0)"
+        }
+      },
+      "AWSSDK.Extensions.Bedrock.MEAI": {
+        "type": "Direct",
+        "requested": "[4.0.101.8, )",
+        "resolved": "4.0.101.8",
+        "contentHash": "5pj7Et+XJU12XJHDfrh0t87h9hm4fUMnp+Q0NNYpV7YYiUe+H/Pb8j/UAgyuAjkYi7Tl5XuIHQmBrzo8gmuTcw==",
+        "dependencies": {
+          "AWSSDK.BedrockRuntime": "4.0.101.1",
+          "AWSSDK.Core": "4.0.101",
+          "Microsoft.Extensions.AI.Abstractions": "10.5.1"
+        }
+      },
+      "AWSSDK.Signin": {
+        "type": "Direct",
+        "requested": "[4.0.102, )",
+        "resolved": "4.0.102",
+        "contentHash": "wBhCYxH9h0XIzSQae6UGiGaeZGGv8I2mxJd9gM1Cmnw3KPX/MJeFo9/3XKsWYgPFbcL/YPSMboW0OnotElDczg==",
+        "dependencies": {
+          "AWSSDK.Core": "[4.0.102.14, 5.0.0)"
+        }
+      },
+      "Microsoft.Extensions.AI": {
+        "type": "Direct",
+        "requested": "[10.11.0, )",
+        "resolved": "10.11.0",
+        "contentHash": "PtgeWqaC3gQ8/saMgkUiwKeqCBPfDOcjfqDLcXtwJI//pu79gYZqUMPOh7/bFdFWcJihP/rWq9sgQd2xQtEP0A==",
+        "dependencies": {
+          "Microsoft.Extensions.AI.Abstractions": "10.11.0",
+          "System.Numerics.Tensors": "10.0.13"
+        }
+      },
+      "AWSSDK.Core": {
+        "type": "Transitive",
+        "resolved": "4.0.102.16",
+        "contentHash": "+Oka3HzrQdsHvsM0lLtJn+Zab7QE9TiPLV+dQ2usIuvCHa6PAcNhcvh6I6mbJZ4SsNBBoVQzeQv0tGmqIOKkNg=="
+      },
+      "Microsoft.Extensions.AI.Abstractions": {
+        "type": "Transitive",
+        "resolved": "10.11.0",
+        "contentHash": "h4DX/TdJU4fk1GGaf19n6Kujkj6VXbGeL4UEOsQ8+ZJC5fVApPauokCtvBP684BYbczUYZQNfo1mbmyHG4WVSg=="
+      },
+      "System.Numerics.Tensors": {
+        "type": "Transitive",
+        "resolved": "10.0.13",
+        "contentHash": "E4JC7KcY4j1yx9uy8tVsHlGThnwLdUWtUz6aLHCqbN/jbtwbwbZgnVEF9atUr/7ynFCbo8Rbij056Y9bWM9ALg=="
+      }
+    }
+  }
+}

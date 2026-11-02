@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.BedrockAgentRuntime" />
+    <PackageReference Include="AWSSDK.BedrockRuntime" />
+    <PackageReference Include="AWSSDK.Extensions.Bedrock.MEAI" />
+    <!-- Reads `aws login` credentials, as the crt extra does for boto3; Lambda never needs it -->
+    <PackageReference Include="AWSSDK.Signin" />
+    <PackageReference Include="Microsoft.Extensions.AI" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="KbDemo.Api.Tests" />
+  </ItemGroup>
+</Project>

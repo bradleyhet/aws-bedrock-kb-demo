@@ -1,4 +1,5 @@
-"""Ask the deployed API instead of Bedrock: POST /ask, signed with SigV4 for IAM authorisation."""
+"""Ask an API instead of Bedrock: POST /ask, signed with SigV4 for the deployed API's IAM
+authorisation, or unsigned for a local container."""
 
 import json
 from collections.abc import Callable
@@ -23,7 +24,10 @@ def send(request: AWSPreparedRequest) -> tuple[int, bytes]:
 
 
 class ApiSearcher:
-    def __init__(self, url: str, credentials: Any, *, region: str, send: Send = send) -> None:
+    def __init__(
+        self, url: str, credentials: Any | None, *, region: str, send: Send = send
+    ) -> None:
+        """No credentials means unsigned requests: for a container on a CI runner, not the API."""
         self._url = url.rstrip("/") + "/ask"
         self._credentials = credentials
         self._region = region
@@ -36,7 +40,8 @@ class ApiSearcher:
             data=json.dumps({"question": question}).encode(),
             headers={"Content-Type": "application/json"},
         )
-        SigV4Auth(self._credentials, "execute-api", self._region).add_auth(request)
+        if self._credentials is not None:
+            SigV4Auth(self._credentials, "execute-api", self._region).add_auth(request)
         status, body = self._send(request.prepare())
         if status != 200:
             raise ApiError(f"The API answered {status}: {_reason(body)}")
