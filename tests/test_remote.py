@@ -47,6 +47,19 @@ def test_the_answer_arrives_as_the_handler_built_it(api, searcher):
     assert remote(api).answer("Hotel limit in Perth?") == searcher.answer("Hotel limit in Perth?")
 
 
+def test_without_credentials_the_question_is_posted_unsigned(api, searcher):
+    # The release gate asks a container on the CI runner, which has no IAM in front of it.
+    local = ApiSearcher("http://localhost:8080", None, region="ap-southeast-2", send=api.send)
+
+    answer = local.answer("Hotel limit in Perth?")
+
+    request = api.requests[0]
+    assert (request.method, request.url) == ("POST", "http://localhost:8080/ask")
+    assert "Authorization" not in request.headers
+    assert "X-Amz-Security-Token" not in request.headers
+    assert answer == searcher.answer("Hotel limit in Perth?")
+
+
 @pytest.mark.parametrize(
     ("status", "body", "reason"),
     [
